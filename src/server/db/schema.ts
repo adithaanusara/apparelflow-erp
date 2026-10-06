@@ -13,12 +13,13 @@ import {
 } from "drizzle-orm/pg-core";
 import { ORDER_STATUSES } from "../../lib/order-rules";
 import { ROLES } from "../../lib/roles";
+import { ITEM_STATUSES } from "../../lib/verification-rules";
 
 export const userRole = pgEnum("user_role", ROLES);
 
 export const orderStatus = pgEnum("order_status", ORDER_STATUSES);
 
-export const itemStatus = pgEnum("item_status", ["GREEN", "YELLOW", "RED"]);
+export const itemStatus = pgEnum("item_status", ITEM_STATUSES);
 
 export const verificationDecision = pgEnum("verification_decision", [
   "APPROVED",
