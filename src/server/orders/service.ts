@@ -9,12 +9,14 @@ import {
   wastagePct,
   type OrderStatus,
 } from "../../lib/order-rules";
+import type { ItemStatus } from "../../lib/verification-rules";
 import type { Database } from "../db/client";
 import {
   cuttingOrders,
   recipeComponents,
   recipes,
   verificationItems,
+  verificationLogs,
 } from "../db/schema";
 import { HttpError } from "../http";
 
@@ -51,8 +53,19 @@ export type OrderSummary = {
     componentName: string;
     piecesPerGarment: number;
     expectedQty: number;
+    // NULL until the verifier has counted the component.
+    actualQty: number | null;
+    status: ItemStatus | null;
   }[];
+  // The most recent rejection, kept so the supervisor can see why a batch
+  // came back and the verifier can see what was wrong last time.
+  latestRejection: { note: string; verifierName: string; at: string } | null;
 };
+
+// Wastage is stored as numeric(7,2). Refusing fabric beyond this multiple of
+// the recipe standard keeps the percentage far inside that range and catches
+// a mistyped yardage.
+const MAX_FABRIC_MULTIPLE = 100;
 
 export async function listRecipes(
   db: Database,
@@ -69,16 +82,38 @@ export async function listRecipes(
 }
 
 // One query shape for every order read, so list and detail always agree.
-function findOrders(db: Database, orderId?: number) {
+function findOrders(
+  db: Database,
+  filter: {
+    orderId?: number;
+    status?: OrderStatus;
+    oldestFirst?: boolean;
+  } = {},
+) {
   return db.query.cuttingOrders.findMany({
-    where: orderId === undefined ? undefined : eq(cuttingOrders.id, orderId),
-    orderBy: desc(cuttingOrders.id),
+    where: and(
+      filter.orderId === undefined
+        ? undefined
+        : eq(cuttingOrders.id, filter.orderId),
+      filter.status === undefined
+        ? undefined
+        : eq(cuttingOrders.status, filter.status),
+    ),
+    orderBy: filter.oldestFirst
+      ? asc(cuttingOrders.id)
+      : desc(cuttingOrders.id),
     with: {
       recipe: true,
       creator: { columns: { fullName: true } },
       items: {
         orderBy: asc(verificationItems.componentId),
         with: { component: true },
+      },
+      logs: {
+        where: eq(verificationLogs.decision, "REJECTED"),
+        orderBy: desc(verificationLogs.id),
+        limit: 1,
+        with: { verifier: { columns: { fullName: true } } },
       },
     },
   });
@@ -91,6 +126,7 @@ function toOrderSummary(
     order.targetQty,
     order.recipe.stdFabricYards,
   );
+  const [rejection] = order.logs;
   return {
     id: order.id,
     orderNo: order.orderNo,
@@ -114,12 +150,77 @@ function toOrderSummary(
       componentName: item.component.componentName,
       piecesPerGarment: item.component.piecesPerGarment,
       expectedQty: item.expectedQty,
+      actualQty: item.actualQty,
+      status: item.status,
     })),
+    latestRejection: rejection
+      ? {
+          note: rejection.rejectionNote ?? "",
+          verifierName: rejection.verifier.fullName,
+          at: rejection.timestamp.toISOString(),
+        }
+      : null,
   };
 }
 
-export async function listOrders(db: Database): Promise<OrderSummary[]> {
-  return (await findOrders(db)).map(toOrderSummary);
+export async function listOrders(
+  db: Database,
+  filter: { status?: OrderStatus; oldestFirst?: boolean } = {},
+): Promise<OrderSummary[]> {
+  return (await findOrders(db, filter)).map(toOrderSummary);
+}
+
+export async function findOrderSummary(
+  db: Database,
+  orderId: number,
+): Promise<OrderSummary | undefined> {
+  const [order] = await findOrders(db, { orderId });
+  return order && toOrderSummary(order);
+}
+
+// Loads the recipe an order refers to and applies the rules that need it.
+async function loadRecipeFor(tx: Database, input: CreateOrderInput) {
+  const recipe = await tx.query.recipes.findFirst({
+    where: eq(recipes.id, input.recipeId),
+    with: { components: true },
+  });
+  if (!recipe) {
+    throw new HttpError(422, "VALIDATION_FAILED", "The order is invalid.", {
+      recipeId: "Select a valid recipe.",
+    });
+  }
+  if (recipe.components.length === 0) {
+    throw new HttpError(422, "VALIDATION_FAILED", "The order is invalid.", {
+      recipeId: "This recipe has no components to cut.",
+    });
+  }
+
+  const expectedFabricYds = expectedFabricYards(
+    input.targetQty,
+    recipe.stdFabricYards,
+  );
+  if (input.actualFabricYds > expectedFabricYds * MAX_FABRIC_MULTIPLE) {
+    throw new HttpError(422, "VALIDATION_FAILED", "The order is invalid.", {
+      actualFabricYds: `Fabric used cannot exceed ${MAX_FABRIC_MULTIPLE} times the ${expectedFabricYds} yd expected for this batch.`,
+    });
+  }
+  return recipe;
+}
+
+// Multiplier engine: one uncounted checklist row per recipe component.
+async function insertExpectedItems(
+  tx: Database,
+  orderId: number,
+  targetQty: number,
+  components: { id: number; piecesPerGarment: number }[],
+) {
+  await tx.insert(verificationItems).values(
+    components.map((component) => ({
+      orderId,
+      componentId: component.id,
+      expectedQty: expectedComponentQty(targetQty, component.piecesPerGarment),
+    })),
+  );
 }
 
 // Creates the order and its expected component counts in one transaction, so
@@ -131,20 +232,7 @@ export async function createOrder(
   createdBy: number,
 ): Promise<OrderSummary> {
   return db.transaction(async (tx) => {
-    const recipe = await tx.query.recipes.findFirst({
-      where: eq(recipes.id, input.recipeId),
-      with: { components: true },
-    });
-    if (!recipe) {
-      throw new HttpError(422, "VALIDATION_FAILED", "The order is invalid.", {
-        recipeId: "Select a valid recipe.",
-      });
-    }
-    if (recipe.components.length === 0) {
-      throw new HttpError(422, "VALIDATION_FAILED", "The order is invalid.", {
-        recipeId: "This recipe has no components to cut.",
-      });
-    }
+    const recipe = await loadRecipeFor(tx, input);
 
     // The order number is derived from the generated id, so it is unique
     // without a read-then-write race. The placeholder only lives inside this
@@ -166,18 +254,9 @@ export async function createOrder(
       .set({ orderNo: formatOrderNo(orderId) })
       .where(eq(cuttingOrders.id, orderId));
 
-    await tx.insert(verificationItems).values(
-      recipe.components.map((component) => ({
-        orderId,
-        componentId: component.id,
-        expectedQty: expectedComponentQty(
-          input.targetQty,
-          component.piecesPerGarment,
-        ),
-      })),
-    );
+    await insertExpectedItems(tx, orderId, input.targetQty, recipe.components);
 
-    const [order] = await findOrders(tx, orderId);
+    const [order] = await findOrders(tx, { orderId });
     return toOrderSummary(order);
   });
 }
@@ -226,7 +305,7 @@ export async function submitOrderForVerification(
       .set({ actualQty: null, status: null })
       .where(eq(verificationItems.orderId, orderId));
 
-    const [order] = await findOrders(tx, orderId);
+    const [order] = await findOrders(tx, { orderId });
     return toOrderSummary(order);
   });
 }
