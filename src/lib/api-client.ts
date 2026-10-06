@@ -9,16 +9,21 @@ export type ApiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: ApiError };
 
-// POSTs JSON to one of this app's API routes and never throws: network
+export function postJson<T>(url: string, body?: unknown) {
+  return sendJson<T>("POST", url, body);
+}
+
+// Sends JSON to one of this app's API routes and never throws: network
 // failures come back as an error result the form can display.
-export async function postJson<T>(
+export async function sendJson<T>(
+  method: "POST" | "PUT",
   url: string,
   body?: unknown,
 ): Promise<ApiResult<T>> {
   let response: Response;
   try {
     response = await fetch(url, {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body ?? {}),
     });

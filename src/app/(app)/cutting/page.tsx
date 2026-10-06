@@ -3,6 +3,7 @@ import {
   canTransition,
   type OrderStatus,
 } from "@/lib/order-rules";
+import { TrafficLight } from "@/components/traffic-light";
 import { requirePageRole } from "@/server/auth/page-session";
 import { getDb } from "@/server/db/client";
 import { listOrders, listRecipes } from "@/server/orders/service";
@@ -51,6 +52,7 @@ export default async function CuttingPage() {
         <ul className="mt-6 space-y-4">
           {orders.map((order) => {
             const overCap = order.wastagePct > order.recipe.wastageCap;
+            const counted = order.items.some((item) => item.actualQty !== null);
             return (
               <li
                 key={order.id}
@@ -71,6 +73,17 @@ export default async function CuttingPage() {
                     {ORDER_STATUS_LABELS[order.status]}
                   </span>
                 </div>
+
+                {order.status === "REJECTED" && order.latestRejection && (
+                  <p className="mt-4 rounded-md border border-red-700 bg-red-50 px-3 py-2 text-sm text-red-950">
+                    <span className="font-semibold">
+                      Rejected by {order.latestRejection.verifierName} on{" "}
+                      {dateFormat.format(new Date(order.latestRejection.at))}{" "}
+                      UTC:
+                    </span>{" "}
+                    {order.latestRejection.note}
+                  </p>
+                )}
 
                 <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
                   <div>
@@ -104,47 +117,82 @@ export default async function CuttingPage() {
                   </div>
                 </dl>
 
-                <details className="mt-4">
+                <details className="mt-4" open={order.status === "REJECTED"}>
                   <summary className="cursor-pointer text-sm font-semibold text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700">
-                    Expected component counts ({order.items.length})
+                    {counted ? "Component counts" : "Expected component counts"}{" "}
+                    ({order.items.length})
                   </summary>
-                  <table className="mt-2 w-full max-w-xl text-left text-sm text-slate-900">
-                    <thead>
-                      <tr className="border-b border-slate-400">
-                        <th scope="col" className="py-1.5 font-semibold">
-                          Component
-                        </th>
-                        <th
-                          scope="col"
-                          className="py-1.5 text-right font-semibold"
-                        >
-                          Per garment
-                        </th>
-                        <th
-                          scope="col"
-                          className="py-1.5 text-right font-semibold"
-                        >
-                          Expected pieces
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {order.items.map((item) => (
-                        <tr
-                          key={item.componentId}
-                          className="border-b border-slate-200"
-                        >
-                          <td className="py-1.5">{item.componentName}</td>
-                          <td className="py-1.5 text-right tabular-nums">
-                            {item.piecesPerGarment}
-                          </td>
-                          <td className="py-1.5 text-right font-semibold tabular-nums">
-                            {quantityFormat.format(item.expectedQty)}
-                          </td>
+                  <div className="overflow-x-auto">
+                    <table className="mt-2 w-full max-w-2xl text-left text-sm text-slate-900">
+                      <thead>
+                        <tr className="border-b border-slate-400">
+                          <th scope="col" className="py-1.5 font-semibold">
+                            Component
+                          </th>
+                          <th
+                            scope="col"
+                            className="py-1.5 text-right font-semibold"
+                          >
+                            Per garment
+                          </th>
+                          <th
+                            scope="col"
+                            className="py-1.5 text-right font-semibold"
+                          >
+                            Expected pieces
+                          </th>
+                          {counted && (
+                            <>
+                              <th
+                                scope="col"
+                                className="py-1.5 pl-4 text-right font-semibold"
+                              >
+                                Counted
+                              </th>
+                              <th
+                                scope="col"
+                                className="py-1.5 pl-4 font-semibold"
+                              >
+                                Status
+                              </th>
+                            </>
+                          )}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {order.items.map((item) => (
+                          <tr
+                            key={item.componentId}
+                            className="border-b border-slate-200"
+                          >
+                            <td className="py-1.5">{item.componentName}</td>
+                            <td className="py-1.5 text-right tabular-nums">
+                              {item.piecesPerGarment}
+                            </td>
+                            <td className="py-1.5 text-right font-semibold tabular-nums">
+                              {quantityFormat.format(item.expectedQty)}
+                            </td>
+                            {counted && (
+                              <>
+                                <td className="py-1.5 pl-4 text-right font-semibold tabular-nums">
+                                  {item.actualQty === null
+                                    ? "—"
+                                    : quantityFormat.format(item.actualQty)}
+                                </td>
+                                <td className="py-1.5 pl-4">
+                                  <TrafficLight
+                                    expectedQty={item.expectedQty}
+                                    actualQty={item.actualQty}
+                                    status={item.status}
+                                  />
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </details>
 
                 <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
