@@ -5,9 +5,9 @@ ApparelFlow ERP: cutting orders are created from production recipes, verified
 component by component, and released to the Sewing Queue only after an
 authorized verifier signs off.
 
-> **Status:** authentication, role switching and the Cutting Supervisor's order
-> engine are built. The Verification Terminal and Sewing Queue are placeholders
-> and come next; this README is updated as each part lands.
+> **Status:** authentication, role switching, the Cutting Supervisor's order
+> engine and the Verification Terminal with its hard stop are built. The Sewing
+> Queue is a placeholder and comes next.
 
 ## Tech stack
 
@@ -78,10 +78,45 @@ All bodies are JSON. Errors have the shape
 | `GET /api/orders`             | cutting_supervisor | All cutting orders |
 | `POST /api/orders`            | cutting_supervisor | Creates an order in `CUTTING_IN_PROGRESS`. `422` with field errors on invalid input |
 | `POST /api/orders/:id/submit` | cutting_supervisor | Moves `CUTTING_IN_PROGRESS` or `REJECTED` to `PENDING_VERIFICATION`. `409` from any other status |
+| `GET /api/verification/orders` | cutting_verifier  | Orders in `PENDING_VERIFICATION` only |
+| `PUT /api/verification/orders/:id/counts` | cutting_verifier | Saves counts as `{ "counts": [{ "componentId", "actualQty" }] }`. The server derives each traffic light |
+| `POST /api/verification/orders/:id/approve` | cutting_verifier | Moves the order to `VERIFIED` and writes the audit log. `422` if any component is RED, missing or uncounted |
+| `POST /api/verification/orders/:id/reject` | cutting_verifier | Body `{ "note" }`. Moves the order to `REJECTED`. `422` without a note |
+
+Any other role calling a verification endpoint gets `403`.
 
 Creating an order derives the expected piece count for every recipe component
 (target quantity x pieces per garment) on the server and stores them as
 `verification_items` in the same transaction.
+
+## The gatekeeper hard stop
+
+| Status | Rule              | Effect                                  |
+| ------ | ----------------- | --------------------------------------- |
+| GREEN  | actual = expected | Passes                                  |
+| YELLOW | actual > expected | Surplus recorded; the batch may proceed |
+| RED    | actual < expected | Shortage; approval is blocked           |
+
+The rule is enforced in three places, each independent of the one before it:
+
+1. **UI:** "Approve Batch" is disabled while any component is RED, uncounted
+   or invalid.
+2. **API:** approval reads the counts stored in the database inside a
+   transaction that locks the order, ignores the request body, and returns
+   `422` listing the blocking components. The verifier id comes from the
+   session and the timestamp from the database.
+3. **Database triggers** (`drizzle/0001_gatekeeper_triggers.sql`), which hold
+   even for a query that bypasses the API:
+   - an order cannot become `VERIFIED` while a component is uncounted or short;
+   - status changes must follow the state machine, and new orders must start
+     as `CUTTING_IN_PROGRESS`;
+   - `verification_logs` is append-only (no update, delete or truncate);
+   - the counts and batch data of a `VERIFIED` order cannot be changed or
+     deleted.
+
+On approval the verifier id, timestamp and wastage % are written to
+`verification_logs`; the component count variances are the frozen
+`verification_items` rows.
 
 ## Scripts
 
@@ -106,16 +141,18 @@ src/
     login/          Sign-in page and demo credential panel
     (app)/          Signed-in shell with the Role Switcher
       cutting/      Cutting Supervisor: order list and creation dialog
-      verification/ Cutting Verifier workspace (placeholder)
+      verification/ Cutting Verifier: count entry, approve and reject
       sewing/       Sewing Queue (placeholder)
   components/       Shared client components and control styles
   lib/              Rules shared by browser and server: roles, order state
-                    machine, multiplier and wastage maths, input validation
+                    machine, multiplier and wastage maths, traffic-light
+                    rules, input validation
   server/           Server-only code
     auth/           Session tokens, login, API and page guards
     orders/         Order service (create, list, submit)
+    verification/   Counts, approval hard stop and rejection
     db/             Drizzle schema, Neon client, migrate and seed scripts
     http.ts         Error type and route wrapper for consistent API errors
 tests/              Vitest suites and the in-memory test database
-drizzle/            Generated SQL migrations
+drizzle/            SQL migrations (schema, then gatekeeper triggers)
 ```
