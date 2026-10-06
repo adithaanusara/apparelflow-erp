@@ -16,7 +16,7 @@ export function postJson<T>(url: string, body?: unknown) {
 // Sends JSON to one of this app's API routes and never throws: network
 // failures come back as an error result the form can display.
 export async function sendJson<T>(
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "DELETE",
   url: string,
   body?: unknown,
 ): Promise<ApiResult<T>> {

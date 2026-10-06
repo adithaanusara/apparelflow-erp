@@ -9,7 +9,7 @@ import {
   primaryButtonClass,
   secondaryButtonClass,
 } from "@/components/ui";
-import { postJson } from "@/lib/api-client";
+import { sendJson } from "@/lib/api-client";
 import {
   checkActualFabricYds,
   checkTargetQty,
@@ -22,25 +22,47 @@ import {
   expectedFabricYards,
   wastagePct,
 } from "@/lib/order-rules";
-import type { RecipeWithComponents } from "@/server/orders/service";
+import type {
+  OrderSummary,
+  RecipeWithComponents,
+} from "@/server/orders/service";
 
-const EMPTY_FORM: Record<CreateOrderField, string> = {
+type FormValues = Record<CreateOrderField, string>;
+
+const EMPTY_FORM: FormValues = {
   recipeId: "",
   targetQty: "",
   fabricRollId: "",
   actualFabricYds: "",
 };
 
+function formValuesOf(order: OrderSummary): FormValues {
+  return {
+    recipeId: String(order.recipe.id),
+    targetQty: String(order.targetQty),
+    fabricRollId: order.fabricRollId,
+    actualFabricYds: String(order.actualFabricYds),
+  };
+}
+
 const quantityFormat = new Intl.NumberFormat("en-US");
 
-export function NewOrderDialog({
+// Creates a cutting order, or edits `order` when one is given. A rejected
+// order has already been counted by the verifier, so its recipe and quantity
+// are locked and only the fabric details can be corrected.
+export function OrderDialog({
   recipes,
+  order,
 }: {
   recipes: RecipeWithComponents[];
+  order?: OrderSummary;
 }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [values, setValues] = useState(EMPTY_FORM);
+  const initialValues = order ? formValuesOf(order) : EMPTY_FORM;
+  const batchLocked = order?.status === "REJECTED";
+  const idPrefix = order ? `order-${order.id}-` : "new-order-";
+  const [values, setValues] = useState(initialValues);
   const [edited, setEdited] = useState<Partial<Record<CreateOrderField, true>>>(
     {},
   );
@@ -74,7 +96,7 @@ export function NewOrderDialog({
   }
 
   function resetForm() {
-    setValues(EMPTY_FORM);
+    setValues(initialValues);
     setEdited({});
     setSubmitAttempted(false);
     setServerErrors({});
@@ -88,7 +110,9 @@ export function NewOrderDialog({
     if (!validation.ok) return;
 
     setPending(true);
-    const result = await postJson("/api/orders", validation.value);
+    const result = order
+      ? await sendJson("PUT", `/api/orders/${order.id}`, validation.value)
+      : await sendJson("POST", "/api/orders", validation.value);
     setPending(false);
 
     if (!result.ok) {
@@ -97,7 +121,6 @@ export function NewOrderDialog({
       return;
     }
     dialogRef.current?.close();
-    resetForm();
     router.refresh();
   }
 
@@ -121,15 +144,20 @@ export function NewOrderDialog({
       ? wastagePct(actualFabricYds, expectedFabric)
       : null;
 
+  const lockedHintId = batchLocked ? `${idPrefix}locked-hint` : undefined;
+
   function describedBy(field: CreateOrderField, hintId?: string) {
-    const ids = [hintId, errorFor(field) ? `${field}-error` : undefined];
+    const ids = [
+      hintId,
+      errorFor(field) ? `${idPrefix}${field}-error` : undefined,
+    ];
     return ids.filter(Boolean).join(" ") || undefined;
   }
 
   function fieldError(field: CreateOrderField) {
     const message = errorFor(field);
     return message ? (
-      <p id={`${field}-error`} className={fieldErrorClass}>
+      <p id={`${idPrefix}${field}-error`} className={fieldErrorClass}>
         {message}
       </p>
     ) : null;
@@ -140,32 +168,48 @@ export function NewOrderDialog({
       <button
         type="button"
         onClick={() => dialogRef.current?.showModal()}
-        className={primaryButtonClass}
+        aria-label={order ? `Edit order ${order.orderNo}` : undefined}
+        className={order ? secondaryButtonClass : primaryButtonClass}
       >
-        New cutting order
+        {order ? "Edit" : "New cutting order"}
       </button>
 
       <dialog
         ref={dialogRef}
-        aria-labelledby="new-order-title"
+        onClose={resetForm}
+        aria-labelledby={`${idPrefix}title`}
         className="m-auto w-[calc(100%-2rem)] max-w-2xl rounded-lg border border-slate-400 bg-white p-0 text-slate-900 backdrop:bg-slate-900/60"
       >
         <form onSubmit={handleSubmit} noValidate className="p-6">
-          <h2 id="new-order-title" className="text-xl font-bold text-slate-900">
-            New cutting order
+          <h2
+            id={`${idPrefix}title`}
+            className="text-xl font-bold text-slate-900"
+          >
+            {order ? `Edit order ${order.orderNo}` : "New cutting order"}
           </h2>
+          {batchLocked && (
+            <p
+              id={`${idPrefix}locked-hint`}
+              className="mt-2 text-sm text-slate-700"
+            >
+              This batch was rejected by the verifier, so its recipe and
+              quantity are locked. Correct the fabric roll and fabric used for
+              the re-cut.
+            </p>
+          )}
 
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <div className="sm:col-span-2">
-              <label htmlFor="recipeId" className={labelClass}>
+              <label htmlFor={`${idPrefix}recipeId`} className={labelClass}>
                 Recipe
               </label>
               <select
-                id="recipeId"
+                id={`${idPrefix}recipeId`}
                 value={values.recipeId}
                 onChange={(event) => setField("recipeId", event.target.value)}
+                disabled={batchLocked}
                 aria-invalid={Boolean(errorFor("recipeId"))}
-                aria-describedby={describedBy("recipeId")}
+                aria-describedby={describedBy("recipeId", lockedHintId)}
                 className={`mt-1 ${inputClass}`}
               >
                 <option value="" className="bg-white text-slate-900">
@@ -185,30 +229,34 @@ export function NewOrderDialog({
             </div>
 
             <div>
-              <label htmlFor="targetQty" className={labelClass}>
+              <label htmlFor={`${idPrefix}targetQty`} className={labelClass}>
                 Target batch quantity (garments)
               </label>
               <input
-                id="targetQty"
+                id={`${idPrefix}targetQty`}
                 type="text"
                 inputMode="numeric"
                 autoComplete="off"
                 placeholder="e.g. 50"
                 value={values.targetQty}
                 onChange={(event) => setField("targetQty", event.target.value)}
+                disabled={batchLocked}
                 aria-invalid={Boolean(errorFor("targetQty"))}
-                aria-describedby={describedBy("targetQty")}
+                aria-describedby={describedBy("targetQty", lockedHintId)}
                 className={`mt-1 ${inputClass}`}
               />
               {fieldError("targetQty")}
             </div>
 
             <div>
-              <label htmlFor="actualFabricYds" className={labelClass}>
+              <label
+                htmlFor={`${idPrefix}actualFabricYds`}
+                className={labelClass}
+              >
                 Actual fabric used (yards)
               </label>
               <input
-                id="actualFabricYds"
+                id={`${idPrefix}actualFabricYds`}
                 type="text"
                 inputMode="decimal"
                 autoComplete="off"
@@ -225,11 +273,11 @@ export function NewOrderDialog({
             </div>
 
             <div className="sm:col-span-2">
-              <label htmlFor="fabricRollId" className={labelClass}>
+              <label htmlFor={`${idPrefix}fabricRollId`} className={labelClass}>
                 Fabric roll ID
               </label>
               <input
-                id="fabricRollId"
+                id={`${idPrefix}fabricRollId`}
                 type="text"
                 autoComplete="off"
                 autoCapitalize="characters"
@@ -247,12 +295,12 @@ export function NewOrderDialog({
           </div>
 
           <section
-            aria-labelledby="expected-heading"
+            aria-labelledby={`${idPrefix}expected-heading`}
             aria-live="polite"
             className="mt-6 rounded-md border border-slate-300 bg-slate-50 p-4"
           >
             <h3
-              id="expected-heading"
+              id={`${idPrefix}expected-heading`}
               className="text-sm font-bold text-slate-900"
             >
               Expected component counts
@@ -265,17 +313,26 @@ export function NewOrderDialog({
                       <th scope="col" className="py-1.5 font-semibold">
                         Component
                       </th>
-                      <th scope="col" className="py-1.5 text-right font-semibold">
+                      <th
+                        scope="col"
+                        className="py-1.5 text-right font-semibold"
+                      >
                         Per garment
                       </th>
-                      <th scope="col" className="py-1.5 text-right font-semibold">
+                      <th
+                        scope="col"
+                        className="py-1.5 text-right font-semibold"
+                      >
                         Expected pieces
                       </th>
                     </tr>
                   </thead>
                   <tbody>
                     {recipe.components.map((component) => (
-                      <tr key={component.id} className="border-b border-slate-200">
+                      <tr
+                        key={component.id}
+                        className="border-b border-slate-200"
+                      >
                         <td className="py-1.5">{component.componentName}</td>
                         <td className="py-1.5 text-right tabular-nums">
                           {component.piecesPerGarment}
@@ -342,8 +399,18 @@ export function NewOrderDialog({
             >
               Cancel
             </button>
-            <button type="submit" disabled={pending} className={primaryButtonClass}>
-              {pending ? "Creating…" : "Create order"}
+            <button
+              type="submit"
+              disabled={pending}
+              className={primaryButtonClass}
+            >
+              {order
+                ? pending
+                  ? "Saving…"
+                  : "Save changes"
+                : pending
+                  ? "Creating…"
+                  : "Create order"}
             </button>
           </div>
         </form>

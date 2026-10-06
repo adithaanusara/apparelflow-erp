@@ -1,5 +1,7 @@
 import {
   ORDER_STATUS_LABELS,
+  canDeleteOrder,
+  canEditOrder,
   canTransition,
   type OrderStatus,
 } from "@/lib/order-rules";
@@ -7,7 +9,8 @@ import { TrafficLight } from "@/components/traffic-light";
 import { requirePageRole } from "@/server/auth/page-session";
 import { getDb } from "@/server/db/client";
 import { listOrders, listRecipes } from "@/server/orders/service";
-import { NewOrderDialog } from "./new-order-dialog";
+import { DeleteOrderButton } from "./delete-order-button";
+import { OrderDialog } from "./order-dialog";
 import { SubmitOrderButton } from "./submit-order-button";
 
 const STATUS_BADGE: Record<OrderStatus, string> = {
@@ -41,7 +44,7 @@ export default async function CuttingPage() {
             Create a batch from a recipe, then submit it to the QC station.
           </p>
         </div>
-        <NewOrderDialog recipes={recipes} />
+        <OrderDialog recipes={recipes} />
       </div>
 
       {orders.length === 0 ? (
@@ -200,17 +203,34 @@ export default async function CuttingPage() {
                     Created by {order.createdByName} on{" "}
                     {dateFormat.format(new Date(order.createdAt))} UTC
                   </p>
-                  {canTransition(order.status, "PENDING_VERIFICATION") && (
-                    <SubmitOrderButton
-                      orderId={order.id}
-                      orderNo={order.orderNo}
-                      label={
-                        order.status === "REJECTED"
-                          ? "Resubmit for verification"
-                          : "Submit for verification"
-                      }
-                    />
-                  )}
+                  <div className="flex flex-wrap items-start justify-end gap-3">
+                    {canDeleteOrder(order.status) && (
+                      <DeleteOrderButton
+                        orderId={order.id}
+                        orderNo={order.orderNo}
+                      />
+                    )}
+                    {canEditOrder(order.status) && (
+                      // Keyed on the last update so the form starts from the
+                      // saved values after each edit.
+                      <OrderDialog
+                        key={order.updatedAt}
+                        recipes={recipes}
+                        order={order}
+                      />
+                    )}
+                    {canTransition(order.status, "PENDING_VERIFICATION") && (
+                      <SubmitOrderButton
+                        orderId={order.id}
+                        orderNo={order.orderNo}
+                        label={
+                          order.status === "REJECTED"
+                            ? "Resubmit for verification"
+                            : "Submit for verification"
+                        }
+                      />
+                    )}
+                  </div>
                 </div>
               </li>
             );

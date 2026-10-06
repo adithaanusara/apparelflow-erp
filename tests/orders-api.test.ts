@@ -18,6 +18,7 @@ const { POST: login } = await import("@/app/api/auth/login/route");
 const { GET: me } = await import("@/app/api/auth/me/route");
 const { GET: listOrders, POST: createOrder } = await import("@/app/api/orders/route");
 const { POST: submitOrder } = await import("@/app/api/orders/[id]/submit/route");
+const { PUT: updateOrder, DELETE: deleteOrder } = await import("@/app/api/orders/[id]/route");
 const { GET: listRecipes } = await import("@/app/api/recipes/route");
 
 const BASE = "http://localhost";
@@ -253,6 +254,183 @@ describe("POST /api/orders/:id/submit", () => {
 
   it.each([999_999, "abc", "1 OR 1=1", "-1"])("returns 404 for order id %j", async (id) => {
     expect((await submit(cookies.cutting_supervisor, id)).status).toBe(404);
+  });
+});
+
+describe("PUT /api/orders/:id (edit before verification)", () => {
+  const ctx = (id: number | string) => ({ params: Promise.resolve({ id: String(id) }) });
+  const edit = (cookie: string | undefined, id: number | string, body: unknown) =>
+    updateOrder(request(`/api/orders/${id}`, { method: "PUT", cookie, body }), ctx(id));
+
+  async function newOrder() {
+    const response = await postOrder(cookies.cutting_supervisor, validOrder());
+    return (await response.json()).order;
+  }
+  const itemsOf = (id: number) => db.select().from(verificationItems).where(eq(verificationItems.orderId, id));
+  const rowOf = async (id: number) => (await db.select().from(cuttingOrders).where(eq(cuttingOrders.id, id)))[0];
+
+  // Takes an order through submission and a rejection with one short component.
+  async function rejectedOrder() {
+    const order = await newOrder();
+    await submit(cookies.cutting_supervisor, order.id);
+    await db.update(verificationItems).set({ actualQty: 1, status: "RED" }).where(eq(verificationItems.orderId, order.id));
+    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, order.id));
+    return order;
+  }
+
+  it("corrects every field of an unsubmitted order and rebuilds the expected counts", async () => {
+    const order = await newOrder();
+    const response = await edit(cookies.cutting_supervisor, order.id, {
+      recipeId: blouseId,
+      targetQty: 20,
+      fabricRollId: "fab-roll-900",
+      actualFabricYds: 37,
+    });
+    expect(response.status).toBe(200);
+
+    const { order: updated } = await response.json();
+    expect(updated).toMatchObject({
+      id: order.id,
+      orderNo: order.orderNo,
+      status: "CUTTING_IN_PROGRESS",
+      targetQty: 20,
+      fabricRollId: "FAB-ROLL-900",
+      actualFabricYds: 37,
+      expectedFabricYds: 36,
+      wastagePct: 2.78,
+    });
+    expect(updated.items.map((item: { expectedQty: number }) => item.expectedQty).sort()).toEqual([20, 20, 20, 40, 40]);
+    expect(await itemsOf(order.id)).toHaveLength(5);
+  });
+
+  it("swaps the checklist when the recipe changes", async () => {
+    const order = await newOrder();
+    const [cropTop] = await db.select().from(recipes).where(eq(recipes.recipeCode, "REC-CT02"));
+    const response = await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), recipeId: cropTop.id, actualFabricYds: 58 });
+    const { order: updated } = await response.json();
+
+    expect(updated.recipe.recipeCode).toBe("REC-CT02");
+    expect(updated.items.map((item: { componentName: string }) => item.componentName)).toContain("Side Strap Accents");
+    expect(updated.items.map((item: { componentName: string }) => item.componentName)).not.toContain("Sleeve Cuffs");
+    expect(await itemsOf(order.id)).toHaveLength(5);
+  });
+
+  it("ignores status, creator and order number in the body", async () => {
+    const order = await newOrder();
+    await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), status: "VERIFIED", orderNo: "HACKED", createdBy: 999 });
+    expect(await rowOf(order.id)).toMatchObject({ status: "CUTTING_IN_PROGRESS", orderNo: order.orderNo });
+  });
+
+  it.each([
+    ["negative quantity", { targetQty: -1 }, "targetQty"],
+    ["decimal quantity", { targetQty: 1.5 }, "targetQty"],
+    ["empty roll id", { fabricRollId: "" }, "fabricRollId"],
+    ["zero fabric", { actualFabricYds: 0 }, "actualFabricYds"],
+    ["unknown recipe", { recipeId: 999_999 }, "recipeId"],
+  ])("returns 422 for %s and changes nothing", async (_label, overrides, field) => {
+    const order = await newOrder();
+    const response = await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), ...overrides });
+    expect(response.status).toBe(422);
+    expect((await response.json()).error.fieldErrors[field]).toBeTruthy();
+    expect(await rowOf(order.id)).toMatchObject({ targetQty: 50, fabricRollId: "FAB-ROLL-882", actualFabricYds: 94.5 });
+  });
+
+  it("lets a rejected order's fabric be corrected for the re-cut, keeping the verifier's counts", async () => {
+    const order = await rejectedOrder();
+    const response = await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), fabricRollId: "FAB-ROLL-883", actualFabricYds: 99 });
+    expect(response.status).toBe(200);
+
+    const { order: updated } = await response.json();
+    expect(updated).toMatchObject({ status: "REJECTED", fabricRollId: "FAB-ROLL-883", actualFabricYds: 99, wastagePct: 10 });
+    expect((await itemsOf(order.id)).every((item) => item.actualQty === 1 && item.status === "RED")).toBe(true);
+  });
+
+  it("refuses to change the quantity or recipe of a rejected order", async () => {
+    const order = await rejectedOrder();
+    const [cropTop] = await db.select().from(recipes).where(eq(recipes.recipeCode, "REC-CT02"));
+
+    for (const [field, overrides] of [
+      ["targetQty", { targetQty: 40 }],
+      ["recipeId", { recipeId: cropTop.id }],
+    ] as const) {
+      const response = await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), ...overrides });
+      expect(response.status).toBe(422);
+      expect((await response.json()).error.fieldErrors[field]).toMatch(/after a rejection/);
+    }
+    expect(await rowOf(order.id)).toMatchObject({ targetQty: 50, recipeId: blouseId });
+    expect((await itemsOf(order.id)).every((item) => item.status === "RED")).toBe(true);
+  });
+
+  it("returns 409 once the order is with the verifier or verified", async () => {
+    const order = await newOrder();
+    await submit(cookies.cutting_supervisor, order.id);
+    expect((await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), targetQty: 1 })).status).toBe(409);
+
+    await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, order.id));
+    await db.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, order.id));
+    const response = await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), actualFabricYds: 90 });
+    expect(response.status).toBe(409);
+    expect(await rowOf(order.id)).toMatchObject({ targetQty: 50, actualFabricYds: 94.5 });
+  });
+
+  it.each(["cutting_verifier", "sewing_supervisor"] as const)("returns 403 for %s", async (role) => {
+    const order = await newOrder();
+    expect((await edit(cookies[role], order.id, { ...validOrder(), targetQty: 1 })).status).toBe(403);
+    expect((await rowOf(order.id)).targetQty).toBe(50);
+  });
+
+  it("returns 401 without a session and 404 for an unknown order", async () => {
+    const order = await newOrder();
+    expect((await edit(undefined, order.id, validOrder())).status).toBe(401);
+    expect((await edit(cookies.cutting_supervisor, 999_999, validOrder())).status).toBe(404);
+  });
+});
+
+describe("DELETE /api/orders/:id", () => {
+  const ctx = (id: number | string) => ({ params: Promise.resolve({ id: String(id) }) });
+  const remove = (cookie: string | undefined, id: number | string) =>
+    deleteOrder(request(`/api/orders/${id}`, { method: "DELETE", cookie }), ctx(id));
+
+  async function newOrderId() {
+    const response = await postOrder(cookies.cutting_supervisor, validOrder());
+    return (await response.json()).order.id as number;
+  }
+  const exists = async (id: number) => (await db.select().from(cuttingOrders).where(eq(cuttingOrders.id, id))).length === 1;
+
+  it("removes an order that was never submitted, with its checklist", async () => {
+    const id = await newOrderId();
+    const response = await remove(cookies.cutting_supervisor, id);
+    expect(response.status).toBe(204);
+    expect(await exists(id)).toBe(false);
+    expect(await db.select().from(verificationItems).where(eq(verificationItems.orderId, id))).toHaveLength(0);
+    expect((await remove(cookies.cutting_supervisor, id)).status).toBe(404);
+  });
+
+  it("returns 409 once the order has been submitted, rejected or verified", async () => {
+    const id = await newOrderId();
+    await submit(cookies.cutting_supervisor, id);
+    expect((await remove(cookies.cutting_supervisor, id)).status).toBe(409);
+
+    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, id));
+    expect((await remove(cookies.cutting_supervisor, id)).status).toBe(409);
+
+    await db.update(cuttingOrders).set({ status: "PENDING_VERIFICATION" }).where(eq(cuttingOrders.id, id));
+    await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, id));
+    await db.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, id));
+    expect((await remove(cookies.cutting_supervisor, id)).status).toBe(409);
+    expect(await exists(id)).toBe(true);
+  });
+
+  it.each(["cutting_verifier", "sewing_supervisor"] as const)("returns 403 for %s", async (role) => {
+    const id = await newOrderId();
+    expect((await remove(cookies[role], id)).status).toBe(403);
+    expect(await exists(id)).toBe(true);
+  });
+
+  it("returns 401 without a session", async () => {
+    const id = await newOrderId();
+    expect((await remove(undefined, id)).status).toBe(401);
+    expect(await exists(id)).toBe(true);
   });
 });
 

@@ -77,6 +77,8 @@ All bodies are JSON. Errors have the shape
 | `GET /api/recipes`            | cutting_supervisor | Recipes with components |
 | `GET /api/orders`             | cutting_supervisor | All cutting orders |
 | `POST /api/orders`            | cutting_supervisor | Creates an order in `CUTTING_IN_PROGRESS`. `422` with field errors on invalid input |
+| `PUT /api/orders/:id`         | cutting_supervisor | Corrects an order (same body as create). `CUTTING_IN_PROGRESS`: all fields. `REJECTED`: fabric roll and fabric used only. `409` once pending or verified |
+| `DELETE /api/orders/:id`      | cutting_supervisor | Deletes an order that was never submitted (`CUTTING_IN_PROGRESS`). `409` otherwise |
 | `POST /api/orders/:id/submit` | cutting_supervisor | Moves `CUTTING_IN_PROGRESS` or `REJECTED` to `PENDING_VERIFICATION`. `409` from any other status |
 | `GET /api/verification/orders` | cutting_verifier  | Orders in `PENDING_VERIFICATION` only |
 | `PUT /api/verification/orders/:id/counts` | cutting_verifier | Saves counts as `{ "counts": [{ "componentId", "actualQty" }] }`. The server derives each traffic light |
@@ -140,7 +142,7 @@ src/
     api/            Route handlers (auth, recipes, orders)
     login/          Sign-in page and demo credential panel
     (app)/          Signed-in shell with the Role Switcher
-      cutting/      Cutting Supervisor: order list and creation dialog
+      cutting/      Cutting Supervisor: order list, create/edit dialog, delete
       verification/ Cutting Verifier: count entry, approve and reject
       sewing/       Sewing Queue (placeholder)
   components/       Shared client components and control styles
@@ -149,7 +151,7 @@ src/
                     rules, input validation
   server/           Server-only code
     auth/           Session tokens, login, API and page guards
-    orders/         Order service (create, list, submit)
+    orders/         Order service (create, edit, delete, list, submit)
     verification/   Counts, approval hard stop and rejection
     db/             Drizzle schema, Neon client, migrate and seed scripts
     http.ts         Error type and route wrapper for consistent API errors

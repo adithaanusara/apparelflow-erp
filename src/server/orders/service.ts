@@ -4,6 +4,7 @@ import type { CreateOrderInput } from "../../lib/order-input";
 import {
   expectedComponentQty,
   expectedFabricYards,
+  canEditOrder,
   formatOrderNo,
   statusesThatCanBecome,
   wastagePct,
@@ -258,6 +259,110 @@ export async function createOrder(
 
     const [order] = await findOrders(tx, { orderId });
     return toOrderSummary(order);
+  });
+}
+
+// Corrects an order that is still in the supervisor's hands.
+//  - CUTTING_IN_PROGRESS: every field can change. If the recipe or quantity
+//    changes, the expected counts are rebuilt in the same transaction.
+//  - REJECTED: only the fabric roll and fabric used can change, because a
+//    re-cut consumes more fabric. The recipe and quantity are what the
+//    verifier counted and rejected, so they stay fixed.
+//  - PENDING_VERIFICATION and VERIFIED: nothing can change (409).
+export async function updateOrder(
+  db: Database,
+  orderId: number,
+  input: CreateOrderInput,
+): Promise<OrderSummary> {
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select()
+      .from(cuttingOrders)
+      .where(eq(cuttingOrders.id, orderId))
+      .for("update");
+    if (!current) {
+      throw new HttpError(404, "NOT_FOUND", "Cutting order not found.");
+    }
+    if (!canEditOrder(current.status)) {
+      throw new HttpError(
+        409,
+        "ORDER_LOCKED",
+        `An order with status ${current.status} can no longer be edited.`,
+      );
+    }
+
+    const batchChanged =
+      input.recipeId !== current.recipeId ||
+      input.targetQty !== current.targetQty;
+    if (current.status === "REJECTED" && batchChanged) {
+      const message =
+        "This cannot change after a rejection. Only the fabric roll and fabric used can be corrected.";
+      throw new HttpError(422, "VALIDATION_FAILED", "The order is invalid.", {
+        ...(input.recipeId !== current.recipeId && { recipeId: message }),
+        ...(input.targetQty !== current.targetQty && { targetQty: message }),
+      });
+    }
+
+    const recipe = await loadRecipeFor(tx, input);
+    await tx
+      .update(cuttingOrders)
+      .set({
+        recipeId: recipe.id,
+        targetQty: input.targetQty,
+        fabricRollId: input.fabricRollId,
+        actualFabricYds: input.actualFabricYds,
+        updatedAt: new Date(),
+      })
+      .where(eq(cuttingOrders.id, orderId));
+
+    if (batchChanged) {
+      await tx
+        .delete(verificationItems)
+        .where(eq(verificationItems.orderId, orderId));
+      await insertExpectedItems(
+        tx,
+        orderId,
+        input.targetQty,
+        recipe.components,
+      );
+    }
+
+    const [order] = await findOrders(tx, { orderId });
+    return toOrderSummary(order);
+  });
+}
+
+// Removes an order entered by mistake. Only possible before it has ever been
+// submitted: CUTTING_IN_PROGRESS cannot be re-entered, so an order in that
+// state has never reached the verifier and has no audit history to lose.
+export async function deleteOrder(
+  db: Database,
+  orderId: number,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const deleted = await tx
+      .delete(cuttingOrders)
+      .where(
+        and(
+          eq(cuttingOrders.id, orderId),
+          eq(cuttingOrders.status, "CUTTING_IN_PROGRESS"),
+        ),
+      )
+      .returning({ id: cuttingOrders.id });
+    if (deleted.length > 0) return;
+
+    const [existing] = await tx
+      .select({ status: cuttingOrders.status })
+      .from(cuttingOrders)
+      .where(eq(cuttingOrders.id, orderId));
+    if (!existing) {
+      throw new HttpError(404, "NOT_FOUND", "Cutting order not found.");
+    }
+    throw new HttpError(
+      409,
+      "ORDER_LOCKED",
+      `An order with status ${existing.status} cannot be deleted. Only orders that were never submitted can be.`,
+    );
   });
 }
 

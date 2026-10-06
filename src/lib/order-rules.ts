@@ -62,6 +62,16 @@ export function wastagePct(
   );
 }
 
+// What the supervisor may still correct. Shared by the UI (which buttons and
+// fields to offer) and enforced independently by the order service.
+export function canEditOrder(status: OrderStatus): boolean {
+  return status === "CUTTING_IN_PROGRESS" || status === "REJECTED";
+}
+
+export function canDeleteOrder(status: OrderStatus): boolean {
+  return status === "CUTTING_IN_PROGRESS";
+}
+
 export function formatOrderNo(orderId: number): string {
   return `CO-${String(orderId).padStart(6, "0")}`;
 }
