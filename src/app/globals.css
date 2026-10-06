@@ -1,1 +1,12 @@
 @import "tailwindcss";
+
+/* The UI is light-only. Declaring it stops browsers in dark mode from giving
+   form controls light text on our light backgrounds. */
+:root {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-slate-100);
+  color: var(--color-slate-900);
+}
