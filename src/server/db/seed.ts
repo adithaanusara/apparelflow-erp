@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import bcrypt from "bcryptjs";
 import { sql } from "drizzle-orm";
+import { DEMO_ACCOUNTS } from "../../lib/demo-accounts";
 import {
   createNeonDatabase,
   requireDatabaseUrl,
@@ -9,28 +10,6 @@ import {
 import { recipeComponents, recipes, users } from "./schema";
 
 const BCRYPT_ROUNDS = 10;
-
-// Demo accounts for evaluators. These credentials are public by design.
-export const DEMO_USERS = [
-  {
-    email: "supervisor@apparelflow.demo",
-    password: "Supervisor@123",
-    role: "cutting_supervisor",
-    fullName: "Demo Cutting Supervisor",
-  },
-  {
-    email: "verifier@apparelflow.demo",
-    password: "Verifier@123",
-    role: "cutting_verifier",
-    fullName: "Demo Cutting Verifier",
-  },
-  {
-    email: "sewing@apparelflow.demo",
-    password: "Sewing@123",
-    role: "sewing_supervisor",
-    fullName: "Demo Sewing Supervisor",
-  },
-] as const;
 
 export const SEED_RECIPES = [
   {
@@ -65,7 +44,7 @@ export const SEED_RECIPES = [
 
 // Idempotent: safe to run repeatedly without duplicating rows.
 export async function seed(db: Database) {
-  for (const { password, ...user } of DEMO_USERS) {
+  for (const { password, ...user } of DEMO_ACCOUNTS) {
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     await db
       .insert(users)
@@ -106,7 +85,7 @@ async function main() {
   try {
     await seed(db);
     console.log(
-      `Seeded ${DEMO_USERS.length} demo users and ${SEED_RECIPES.length} recipes.`,
+      `Seeded ${DEMO_ACCOUNTS.length} demo users and ${SEED_RECIPES.length} recipes.`,
     );
   } finally {
     await pool.end();

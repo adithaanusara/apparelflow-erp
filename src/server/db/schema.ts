@@ -11,19 +11,12 @@ import {
   unique,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { ORDER_STATUSES } from "../../lib/order-rules";
+import { ROLES } from "../../lib/roles";
 
-export const userRole = pgEnum("user_role", [
-  "cutting_supervisor",
-  "cutting_verifier",
-  "sewing_supervisor",
-]);
+export const userRole = pgEnum("user_role", ROLES);
 
-export const orderStatus = pgEnum("order_status", [
-  "CUTTING_IN_PROGRESS",
-  "PENDING_VERIFICATION",
-  "REJECTED",
-  "VERIFIED",
-]);
+export const orderStatus = pgEnum("order_status", ORDER_STATUSES);
 
 export const itemStatus = pgEnum("item_status", ["GREEN", "YELLOW", "RED"]);
 
