@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { NextRequest } from "next/server";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { DEMO_ACCOUNTS } from "@/lib/demo-accounts";
@@ -171,6 +171,7 @@ describe("POST /api/orders", () => {
     ["zero fabric", { actualFabricYds: 0 }, "actualFabricYds"],
     ["blank roll id", { fabricRollId: "  " }, "fabricRollId"],
     ["unknown recipe", { recipeId: 999_999 }, "recipeId"],
+    ["implausible fabric", { targetQty: 1, actualFabricYds: 500 }, "actualFabricYds"],
   ])("returns 422 with a field error for %s", async (_label, overrides, field) => {
     const before = await db.$count(cuttingOrders);
     const response = await postOrder(cookies.cutting_supervisor, { ...validOrder(), ...overrides });
@@ -226,14 +227,17 @@ describe("POST /api/orders/:id/submit", () => {
 
   it("refuses to resubmit a VERIFIED order", async () => {
     const id = await newOrderId();
+    await submit(cookies.cutting_supervisor, id);
+    await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, id));
     await db.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, id));
     expect((await submit(cookies.cutting_supervisor, id)).status).toBe(409);
   });
 
   it("resubmits a REJECTED order and clears the previous counts", async () => {
     const id = await newOrderId();
-    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, id));
+    await submit(cookies.cutting_supervisor, id);
     await db.update(verificationItems).set({ actualQty: 0, status: "RED" }).where(eq(verificationItems.orderId, id));
+    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, id));
 
     expect((await submit(cookies.cutting_supervisor, id)).status).toBe(200);
     const items = await db.select().from(verificationItems).where(eq(verificationItems.orderId, id));
