@@ -109,9 +109,21 @@ export const cuttingOrders = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // "Start Sewing Assembly" is recorded here rather than as a fifth status,
+    // so the Sewing Queue rule stays exactly status = 'VERIFIED'.
+    sewingStartedAt: timestamp("sewing_started_at", { withTimezone: true }),
+    sewingStartedBy: integer("sewing_started_by").references(() => users.id),
   },
   (t) => [
     index("cutting_orders_status_idx").on(t.status),
+    check(
+      "cutting_orders_sewing_requires_verified",
+      sql`${t.sewingStartedAt} IS NULL OR ${t.status} = 'VERIFIED'`,
+    ),
+    check(
+      "cutting_orders_sewing_start_attributed",
+      sql`(${t.sewingStartedAt} IS NULL) = (${t.sewingStartedBy} IS NULL)`,
+    ),
     check("cutting_orders_target_qty_positive", sql`${t.targetQty} > 0`),
     check(
       "cutting_orders_actual_fabric_yds_positive",
@@ -140,7 +152,10 @@ export const verificationItems = pgTable(
       t.orderId,
       t.componentId,
     ),
-    check("verification_items_expected_qty_positive", sql`${t.expectedQty} > 0`),
+    check(
+      "verification_items_expected_qty_positive",
+      sql`${t.expectedQty} > 0`,
+    ),
     check(
       "verification_items_actual_qty_non_negative",
       sql`${t.actualQty} >= 0`,
@@ -190,7 +205,8 @@ export const verificationLogs = pgTable(
 );
 
 export const usersRelations = relations(users, ({ many }) => ({
-  orders: many(cuttingOrders),
+  orders: many(cuttingOrders, { relationName: "creator" }),
+  sewingStarts: many(cuttingOrders, { relationName: "sewingStarter" }),
   verifications: many(verificationLogs),
 }));
 
@@ -219,6 +235,12 @@ export const cuttingOrdersRelations = relations(
     creator: one(users, {
       fields: [cuttingOrders.createdBy],
       references: [users.id],
+      relationName: "creator",
+    }),
+    sewingStarter: one(users, {
+      fields: [cuttingOrders.sewingStartedBy],
+      references: [users.id],
+      relationName: "sewingStarter",
     }),
     items: many(verificationItems),
     logs: many(verificationLogs),

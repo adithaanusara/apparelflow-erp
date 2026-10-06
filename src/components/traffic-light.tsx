@@ -18,36 +18,48 @@ const STYLES: Record<ItemStatus | "UNCOUNTED", { badge: string; dot: string }> =
   };
 
 // The status is always written out in words next to the colour, so it does
-// not depend on colour vision.
+// not depend on colour vision. `compact` drops the detail ("Match",
+// "Short by 4") on narrow screens, for tables where the expected and counted
+// numbers are already in the neighbouring columns.
 export function TrafficLight({
   expectedQty,
   actualQty,
   status,
+  compact = false,
 }: {
   expectedQty: number;
   actualQty: number | null;
   status: ItemStatus | null;
+  compact?: boolean;
 }) {
   const difference = actualQty === null ? 0 : actualQty - expectedQty;
-  const label =
-    status === null
-      ? "Not counted"
-      : status === "GREEN"
-        ? "GREEN · Match"
-        : status === "YELLOW"
-          ? `YELLOW · Excess +${difference}`
-          : `RED · Short by ${-difference}`;
+  const detail =
+    status === "GREEN"
+      ? "Match"
+      : status === "YELLOW"
+        ? `Excess +${difference}`
+        : status === "RED"
+          ? `Short by ${-difference}`
+          : null;
   const style = STYLES[status ?? "UNCOUNTED"];
 
   return (
     <span
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-semibold whitespace-nowrap ${style.badge}`}
+      className={`inline-flex items-center gap-2 rounded-full border py-1 text-sm font-semibold whitespace-nowrap ${compact ? "px-2 sm:px-3" : "px-3"} ${style.badge}`}
     >
       <span
         aria-hidden="true"
         className={`size-2.5 rounded-full ${style.dot}`}
       />
-      {label}
+      <span>
+        {status ?? "Not counted"}
+        {detail && (
+          <span className={compact ? "hidden sm:inline" : undefined}>
+            {" · "}
+            {detail}
+          </span>
+        )}
+      </span>
     </span>
   );
 }

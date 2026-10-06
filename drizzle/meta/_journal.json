@@ -15,6 +15,13 @@
       "when": 1791288748296,
       "tag": "0001_gatekeeper_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791307011468,
+      "tag": "0002_sewing_handoff",
+      "breakpoints": true
     }
   ]
 }

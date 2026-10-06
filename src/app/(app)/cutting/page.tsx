@@ -56,6 +56,9 @@ export default async function CuttingPage() {
           {orders.map((order) => {
             const overCap = order.wastagePct > order.recipe.wastageCap;
             const counted = order.items.some((item) => item.actualQty !== null);
+            // With counts shown there are five columns; on a phone the
+            // per-garment multiplier is the one to drop.
+            const perGarmentCell = counted ? "hidden sm:table-cell" : "";
             return (
               <li
                 key={order.id}
@@ -134,7 +137,7 @@ export default async function CuttingPage() {
                           </th>
                           <th
                             scope="col"
-                            className="py-1.5 text-right font-semibold"
+                            className={`py-1.5 text-right font-semibold ${perGarmentCell}`}
                           >
                             Per garment
                           </th>
@@ -148,13 +151,13 @@ export default async function CuttingPage() {
                             <>
                               <th
                                 scope="col"
-                                className="py-1.5 pl-4 text-right font-semibold"
+                                className="py-1.5 pl-2 sm:pl-4 text-right font-semibold"
                               >
                                 Counted
                               </th>
                               <th
                                 scope="col"
-                                className="py-1.5 pl-4 font-semibold"
+                                className="py-1.5 pl-2 sm:pl-4 font-semibold"
                               >
                                 Status
                               </th>
@@ -169,7 +172,9 @@ export default async function CuttingPage() {
                             className="border-b border-slate-200"
                           >
                             <td className="py-1.5">{item.componentName}</td>
-                            <td className="py-1.5 text-right tabular-nums">
+                            <td
+                              className={`py-1.5 text-right tabular-nums ${perGarmentCell}`}
+                            >
                               {item.piecesPerGarment}
                             </td>
                             <td className="py-1.5 text-right font-semibold tabular-nums">
@@ -177,16 +182,17 @@ export default async function CuttingPage() {
                             </td>
                             {counted && (
                               <>
-                                <td className="py-1.5 pl-4 text-right font-semibold tabular-nums">
+                                <td className="py-1.5 pl-2 sm:pl-4 text-right font-semibold tabular-nums">
                                   {item.actualQty === null
                                     ? "—"
                                     : quantityFormat.format(item.actualQty)}
                                 </td>
-                                <td className="py-1.5 pl-4">
+                                <td className="py-1.5 pl-2 sm:pl-4">
                                   <TrafficLight
                                     expectedQty={item.expectedQty}
                                     actualQty={item.actualQty}
                                     status={item.status}
+                                    compact
                                   />
                                 </td>
                               </>
