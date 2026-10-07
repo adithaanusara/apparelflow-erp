@@ -20,6 +20,25 @@ authorized verifier signs off.
 | Auth      | bcrypt password hashes, signed JWT session cookie (`jose`) |
 | Tests     | Vitest against in-memory Postgres (PGlite) |
 
+## Architecture
+
+- **One Next.js application** serves the pages and the JSON API. Pages are
+  Server Components that read through the same service functions the API
+  uses; every change goes through an API route handler.
+- **Three layers.** `src/lib` holds rules shared by the browser and the
+  server (state machine, multiplier, traffic lights, validation).
+  `src/server` holds session handling, role guards and one service per
+  workspace. `src/app` holds the pages and thin route handlers.
+- **Each rule is enforced on the server and again in the database.** Route
+  handlers check the role and the input, services check the order's status
+  inside a transaction, and constraints and triggers refuse anything that
+  slips past. See [The gatekeeper hard stop](#the-gatekeeper-hard-stop) and
+  [Database schema](#database-schema).
+
+An order moves through `CUTTING_IN_PROGRESS` → `PENDING_VERIFICATION` →
+`VERIFIED`, or back through `REJECTED` to `PENDING_VERIFICATION`. `VERIFIED`
+is final and is the only status the Sewing Queue shows.
+
 ## Getting started
 
 Requires Node.js 22 or later and a PostgreSQL database (Neon).
@@ -136,6 +155,133 @@ On approval the verifier id, timestamp and wastage % are written to
   rule stays literally `status = 'VERIFIED'`. The database only accepts a
   start on a `VERIFIED` order and makes the start record permanent
   (`drizzle/0002_sewing_handoff.sql`).
+
+## Database schema
+
+PostgreSQL on Neon, defined in `src/server/db/schema.ts` with Drizzle ORM and
+applied by the SQL migrations in `drizzle/`.
+
+```mermaid
+erDiagram
+    users ||--o{ cutting_orders : "creates"
+    users ||--o{ cutting_orders : "starts sewing on"
+    users ||--o{ verification_logs : "signs"
+    recipes ||--|{ recipe_components : "has"
+    recipes ||--o{ cutting_orders : "is cut as"
+    cutting_orders ||--|{ verification_items : "has"
+    cutting_orders ||--o{ verification_logs : "has"
+    recipe_components ||--o{ verification_items : "is counted in"
+```
+
+Every table has `id integer` as an auto-generated identity primary key; it is
+omitted from the tables below.
+
+### Enum types
+
+| Type                    | Values                                                             |
+| ----------------------- | ------------------------------------------------------------------ |
+| `user_role`             | `cutting_supervisor`, `cutting_verifier`, `sewing_supervisor`      |
+| `order_status`          | `CUTTING_IN_PROGRESS`, `PENDING_VERIFICATION`, `REJECTED`, `VERIFIED` |
+| `item_status`           | `GREEN`, `YELLOW`, `RED`                                           |
+| `verification_decision` | `APPROVED`, `REJECTED`                                             |
+
+### `users`
+
+| Column          | Type          | Rules                     |
+| --------------- | ------------- | ------------------------- |
+| `email`         | `text`        | required, unique          |
+| `password_hash` | `text`        | required; bcrypt hash     |
+| `role`          | `user_role`   | required                  |
+| `full_name`     | `text`        | required                  |
+| `created_at`    | `timestamptz` | required, default `now()` |
+
+Has many cutting orders (as creator) and verification logs (as verifier).
+
+### `recipes`
+
+| Column             | Type           | Rules                         |
+| ------------------ | -------------- | ----------------------------- |
+| `recipe_code`      | `text`         | required, unique              |
+| `name`             | `text`         | required                      |
+| `category`         | `text`         | required                      |
+| `std_fabric_yards` | `numeric(6,2)` | required, greater than 0      |
+| `wastage_cap`      | `numeric(5,2)` | required, 0 or more (percent) |
+
+Has many components and cutting orders. Seeded with `REC-BL01` Casual Blouse
+(1.8 yd, 5% cap) and `REC-CT02` Crop Top (1.1 yd, 8% cap).
+
+### `recipe_components`
+
+| Column               | Type      | Rules                                        |
+| -------------------- | --------- | -------------------------------------------- |
+| `recipe_id`          | `integer` | required; references `recipes`, cascade delete |
+| `component_name`     | `text`    | required; unique within a recipe             |
+| `pieces_per_garment` | `integer` | required, greater than 0                     |
+| `image_url`          | `text`    | optional                                     |
+
+Belongs to a recipe. Five components are seeded for each recipe.
+
+### `cutting_orders`
+
+| Column              | Type            | Rules                                          |
+| ------------------- | --------------- | ---------------------------------------------- |
+| `order_no`          | `text`          | required, unique; `CO-` plus the padded id     |
+| `recipe_id`         | `integer`       | required; references `recipes`                 |
+| `target_qty`        | `integer`       | required, greater than 0                       |
+| `fabric_roll_id`    | `text`          | required                                       |
+| `actual_fabric_yds` | `numeric(10,2)` | required, greater than 0                       |
+| `status`            | `order_status`  | required, default `CUTTING_IN_PROGRESS`; indexed |
+| `created_by`        | `integer`       | required; references `users`                   |
+| `created_at`        | `timestamptz`   | required, default `now()`                      |
+| `updated_at`        | `timestamptz`   | required, default `now()`                      |
+| `sewing_started_at` | `timestamptz`   | optional; only allowed when status is `VERIFIED` |
+| `sewing_started_by` | `integer`       | optional; references `users`; set together with `sewing_started_at` |
+
+Belongs to a recipe and a user; has many verification items and logs.
+Trigger `cutting_orders_guard` enforces the state machine and freezes a
+`VERIFIED` order; `cutting_orders_sewing_start_is_permanent` makes the sewing
+start record unchangeable.
+
+### `verification_items`
+
+One row per recipe component per order, created with the order.
+
+| Column         | Type          | Rules                                             |
+| -------------- | ------------- | ------------------------------------------------- |
+| `order_id`     | `integer`     | required; references `cutting_orders`, cascade delete |
+| `component_id` | `integer`     | required; references `recipe_components`; unique within an order |
+| `expected_qty` | `integer`     | required, greater than 0; target quantity x pieces per garment |
+| `actual_qty`   | `integer`     | `NULL` until counted; 0 or more                   |
+| `status`       | `item_status` | `NULL` until counted                              |
+
+A check constraint keeps `status` consistent with the counts: both `NULL`, or
+`GREEN` when equal, `YELLOW` when actual is higher, `RED` when lower. Trigger
+`verification_items_guard` freezes the rows of a `VERIFIED` order.
+
+### `verification_logs`
+
+The audit trail: one row per approve or reject decision.
+
+| Column           | Type                    | Rules                                   |
+| ---------------- | ----------------------- | --------------------------------------- |
+| `order_id`       | `integer`               | required; references `cutting_orders`; indexed |
+| `verifier_id`    | `integer`               | required; references `users`            |
+| `decision`       | `verification_decision` | required                                |
+| `rejection_note` | `text`                  | required and non-blank when the decision is `REJECTED` |
+| `wastage_pct`    | `numeric(7,2)`          | required; computed on the server        |
+| `timestamp`      | `timestamptz`           | required, default `now()`               |
+
+An order can have many rejections but, through a partial unique index, at
+most one approval. The table is append-only: triggers refuse `UPDATE`,
+`DELETE` and `TRUNCATE`.
+
+### Migrations
+
+| File                                   | Contents                                              |
+| -------------------------------------- | ----------------------------------------------------- |
+| `drizzle/0000_initial_schema.sql`      | The six tables, enums, constraints and indexes        |
+| `drizzle/0001_gatekeeper_triggers.sql` | Append-only audit log, state machine and hard-stop triggers |
+| `drizzle/0002_sewing_handoff.sql`      | Sewing start columns, their constraints and trigger   |
 
 ## Scripts
 
