@@ -10,3 +10,97 @@ body {
   background-color: var(--color-slate-100);
   color: var(--color-slate-900);
 }
+
+/* Height-based variants for the sign-in hero: `tall:` has room for the
+   illustration, `roomy:` for the largest headline size as well. */
+@custom-variant tall (@media (min-height: 620px));
+@custom-variant roomy (@media (min-height: 860px));
+
+/* Motion for the sign-in page. Every use is behind Tailwind's `motion-safe:`
+   variant, so visitors who ask for reduced motion get the final state with no
+   animation at all. */
+@theme {
+  --animate-rise: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.8s ease-out both;
+  --animate-reveal: reveal 0.25s ease-out both;
+  --animate-shake: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+  --animate-gradient-pan: gradient-pan 20s ease-in-out infinite;
+  --animate-float: float 11s ease-in-out infinite;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(18px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes reveal {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes shake {
+    10%,
+    90% {
+      transform: translateX(-1px);
+    }
+    20%,
+    80% {
+      transform: translateX(2px);
+    }
+    30%,
+    50%,
+    70% {
+      transform: translateX(-4px);
+    }
+    40%,
+    60% {
+      transform: translateX(4px);
+    }
+  }
+
+  @keyframes gradient-pan {
+    0%,
+    100% {
+      background-position: 0% 50%;
+    }
+    50% {
+      background-position: 100% 50%;
+    }
+  }
+
+  @keyframes float {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0);
+    }
+    50% {
+      transform: translate3d(0, -22px, 0);
+    }
+  }
+}
+
+/* The "Pause animation" button on the sign-in page sets this attribute. */
+header[data-motion-paused],
+header[data-motion-paused] * {
+  animation-play-state: paused !important;
+}
