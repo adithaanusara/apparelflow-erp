@@ -4,8 +4,8 @@ This report documents how AI tools were used to build the ApparelFlow ERP
 Cutting Operations & Gatekeeper Verification Terminal, where their output was
 wrong, and how it was corrected.
 
-> **Draft status:** covers work up to Day 2 (authentication, Role Switcher,
-> order engine). Items marked **TODO** are still to be written.
+> **Status:** covers all four days. Section 5 is reserved for my own
+> human-in-the-loop notes and is still to be completed.
 
 ## 1. Tools & Prompting
 
@@ -13,6 +13,8 @@ wrong, and how it was corrected.
 | ---- | -------- |
 | Claude Code (Claude Opus, VS Code extension) | Day 2: session and role-guard layer, order creation API and service, order dialog UI, input validation, Vitest suites, README updates |
 | Claude Code (Claude Opus, VS Code extension) | Day 1: project scaffold, Drizzle schema, migration, seed script |
+| Claude Code (Claude Opus, VS Code extension) | Day 3: traffic-light rules, verification service and API, hard-stop logic, database triggers, Verifier Terminal UI, order edit and delete, tests |
+| Claude Code (Claude Opus, VS Code extension) | Day 4: Sewing Queue query, API and UI, sewing handoff migration, tests, README schema documentation, the technical sections of this report |
 
 **Prompting Approach:**
 The work was driven iteratively using the challenge brief. I provided one clear milestone per session (e.g., "Day 1: Scaffold and Database" and "Day 2: Auth and Orders"). Before accepting any AI-generated code, I manually reviewed the logic, specifically checking database constraints and error handling, and instructed the AI to fix any edge cases before moving forward.
@@ -89,6 +91,18 @@ check("verification_logs_rejection_requires_note", sql`${t.decision} <> 'REJECTE
 sql`${t.decision} <> 'REJECTED' OR length(btrim(coalesce(${t.rejectionNote}, ''))) > 0`
 ```
 
+### 2.3 Further defects found during Day 3 and Day 4
+
+Each of these was in AI-generated code, passed lint and type-checking, and was
+found by running the application rather than by reading it.
+
+| # | Defect | Where | How it was found | Fix |
+| - | ------ | ----- | ---------------- | --- |
+| a | **Approval could crash with a 500.** Day 2's order form accepted up to 1,000,000 yards for any quantity. For a very small batch the wastage percentage exceeded the `numeric(7,2)` column it is stored in at approval, so the insert into `verification_logs` would fail. | `src/server/orders/service.ts`, `src/lib/order-input.ts` | Noticed while writing the approval transaction on Day 3, when the stored wastage value was first used. | Order creation and editing refuse fabric above 100 times the recipe standard (`422` with a field error). Covered by a test. |
+| b | **Count inputs stretched across the whole card.** The input had both `w-32` and the shared `w-full` class; the shared class won, so the intended width was silently ignored. | `src/app/(app)/verification/verification-card.tsx` | Screenshot of the Verifier Terminal in headless Chrome. | The width is now set with `max-w-36`, which does not compete with `w-full`. |
+| c | **Verifier table unusable on a phone.** At 390px the table scrolled sideways inside the card, cutting off the component names and the traffic lights, which are the two things the verifier needs to see. | Same file | Screenshot at phone width. | The rows were rebuilt as a grid that stacks into two lines per component on small screens. |
+| d | **Status badges clipped on a phone** in the read-only count tables ("GREE" instead of "GREEN · Match"). | `src/app/(app)/sewing/page.tsx`, `src/app/(app)/cutting/page.tsx` | Screenshot at phone width on Day 4, plus a scripted check that no table is wider than its container. | The badge shows only the colour word on narrow screens, and the supervisor's table hides its per-garment column there. |
+| e | **The AI's test setup broke my running dev server.** To test in a browser without writing to the Neon database, the AI temporarily patched `src/server/db/client.ts` in the working folder. My own `next dev` was running from the same folder and picked the patch up, so pages returned server errors for about a minute. | Process error, not committed code | The AI's second dev server refused to start because mine was already running, which exposed the conflict. | The patch was reverted immediately. All later browser checks ran from a separate copy of the project. |
 
 ## 3. Human Refactoring
 
@@ -100,10 +114,43 @@ While the AI handled the bulk of the coding and autonomous testing (such as runn
 
 ## 4. Defensive Architecture
 
-How the state machine and API guards prevent unauthorized status overrides, as
-built so far.
+How the state machine and the API guards prevent unauthorized status
+overrides.
 
-**State machine**
+### 4.1 Architecture flow
+
+Every order moves through one pipeline. Each arrow is a single endpoint, open
+to a single role, that performs one named transition.
+
+```
+                 Cutting Supervisor                Cutting Verifier               Sewing Supervisor
+                 ------------------                ----------------               -----------------
+POST /api/orders
+      |
+      v
+CUTTING_IN_PROGRESS --POST /api/orders/:id/submit--> PENDING_VERIFICATION
+      ^  (edit, delete)                                |            |
+      |                                  PUT .../counts (traffic lights derived on the server)
+      |                                                |            |
+      |                               POST .../reject  |            |  POST .../approve
+      |                               (note required)  |            |  (422 if any component is
+      |                                                v            |   RED, missing or uncounted)
+      +---POST /api/orders/:id/submit------------- REJECTED         v
+          (counts cleared, fabric may be corrected)             VERIFIED --> GET /api/sewing/queue
+                                                                (terminal)   POST /api/sewing/queue/:id/start
+```
+
+A request passes through the same layers in the same order on every endpoint:
+
+1. `route()` wrapper: turns every failure into one JSON error shape.
+2. `requireRole()`: `401` without a valid session, `403` for the wrong role.
+3. Input validation: `422` with per-field messages.
+4. Service function: one database transaction that checks the current status
+   and writes the result.
+5. Database constraints and triggers: the last line, independent of the code
+   above.
+
+### 4.2 State machine
 
 - The legal transitions are defined once, in `src/lib/order-rules.ts`:
   `CUTTING_IN_PROGRESS → PENDING_VERIFICATION`,
@@ -113,12 +160,21 @@ built so far.
   named transition. `POST /api/orders` ignores `status`, `createdBy`,
   `orderNo` and item counts in the request body; a test sends all four and
   asserts they have no effect.
-- The status check is part of the `UPDATE` statement itself
-  (`WHERE id = ? AND status IN (...)`), not a read followed by a write, so two
-  simultaneous requests cannot both move the same order. An illegal move
-  returns `409`.
+- Status checks are never a read followed by a separate write. Submission
+  puts the check in the `UPDATE` itself (`WHERE id = ? AND status IN (...)`).
+  Counting, approving and rejecting first lock the order row
+  (`SELECT ... FOR UPDATE`), so an approval cannot be decided on counts that
+  another request is changing. An illegal move returns `409`.
+- The same transition table is enforced again by a database trigger. A test
+  tries every pair of statuses with a direct `UPDATE` and asserts that the
+  database allows exactly the pairs `canTransition()` allows, so the two
+  definitions cannot drift apart unnoticed.
+- "Start Sewing Assembly" is not a fifth status. It is recorded as
+  `sewing_started_at` and `sewing_started_by` on the order, so the state
+  machine stays at four states and the Sewing Queue rule stays literally
+  `status = 'VERIFIED'`.
 
-**API guards**
+### 4.3 API guards
 
 - Every route handler calls `requireRole(request, ...)` before doing anything
   else. No valid session returns `401`; the wrong role returns `403`.
@@ -129,7 +185,37 @@ built so far.
 - Page redirects and hidden buttons are treated as convenience only, never as
   the security boundary.
 
-**Database constraints**
+| Endpoints | Role allowed |
+| --------- | ------------ |
+| `/api/orders`, `/api/orders/:id`, `/api/orders/:id/submit`, `/api/recipes` | `cutting_supervisor` |
+| `/api/verification/orders`, `.../:id/counts`, `.../:id/approve`, `.../:id/reject` | `cutting_verifier` |
+| `/api/sewing/queue`, `/api/sewing/queue/:id/start` | `sewing_supervisor` |
+
+### 4.4 Verification API and the hard stop
+
+The rule "no batch with a shortage may be approved" is enforced three times.
+
+1. **UI.** "Approve Batch" is disabled while any component is RED, uncounted
+   or invalid. This is a convenience, not a control.
+2. **API** (`src/server/verification/service.ts`).
+   - Saving counts: the server computes GREEN, YELLOW or RED from the stored
+     expected quantity. A `status` or `expectedQty` sent by the client is
+     never read.
+   - Approving: the handler does not read the request body at all. Inside one
+     transaction it locks the order, loads the stored counts, and applies
+     `approvalBlockers()`. If any component is short, uncounted or missing it
+     returns `422` naming each one, and nothing is written.
+   - On success the status change and the audit row (`verifier_id` from the
+     session, `timestamp` from the database clock, `wastage_pct` computed on
+     the server) are written in the same transaction.
+   - Rejecting requires a non-blank note (`422` otherwise). The counts are
+     kept as the record of what was wrong and cleared on resubmission.
+3. **Database.** A trigger refuses to set an order to `VERIFIED` while any of
+   its components is uncounted or short, whatever issued the `UPDATE`.
+
+### 4.5 Database constraints and triggers
+
+Constraints from the initial schema (`drizzle/0000_initial_schema.sql`):
 
 - Check constraints reject non-positive quantities and fabric yards
   regardless of what the application sends.
@@ -138,13 +224,113 @@ built so far.
 - A partial unique index allows at most one `APPROVED` log per order, and a
   check constraint requires a non-blank note on every rejection.
 
-**Input validation**
+Triggers added for the gatekeeper (`drizzle/0001_gatekeeper_triggers.sql`):
+
+| Trigger | Table | What it refuses |
+| ------- | ----- | --------------- |
+| `verification_logs_append_only`, `verification_logs_no_truncate` | `verification_logs` | Any `UPDATE`, `DELETE` or `TRUNCATE`. The audit trail can only be added to. |
+| `cutting_orders_guard` | `cutting_orders` | A new order in any status but `CUTTING_IN_PROGRESS`; a status change outside the state machine; moving to `VERIFIED` with an uncounted or short component; changing the batch data of a `VERIFIED` order; deleting a `VERIFIED` order. |
+| `verification_items_guard` | `verification_items` | Adding, changing or removing the counts of a `VERIFIED` order. |
+
+Sewing handoff (`drizzle/0002_sewing_handoff.sql`):
+
+- Two check constraints: sewing can only be recorded as started on a
+  `VERIFIED` order, and a start must name the user who started it.
+- Trigger `cutting_orders_sewing_start_is_permanent`: once set, the start
+  time and user cannot be changed or cleared.
+
+Together these make the audit record required by the brief immutable in the
+database itself: the verifier id, timestamp and wastage % in
+`verification_logs`, and the component count variances in the frozen
+`verification_items` rows.
+
+### 4.6 Sewing Queue isolation
+
+- `listSewingQueue()` in `src/server/sewing/service.ts` has
+  `WHERE status = 'VERIFIED'` written into the query and takes no filter
+  argument. The route handler passes nothing from the request to it, so no
+  URL parameter or body can widen the result.
+- Starting sewing on an order that is not `VERIFIED` returns the same `404`
+  as an order that does not exist, so the endpoint cannot be used to probe
+  for unverified orders.
+- The cutting supervisor and the verifier receive `403` from both sewing
+  endpoints.
+
+### 4.7 Input validation
 
 - One module (`src/lib/order-input.ts`) validates order input for both the
   browser form and the API, so the two cannot drift apart. The API accepts
   JSON numbers only: `"50"`, `12.5`, `-5`, `NaN` and empty payloads are
   rejected with `422` and per-field messages.
+- Counts follow the same approach in `src/lib/verification-rules.ts`: whole
+  numbers from 0 upward, with negatives, decimals, numeric strings and text
+  rejected.
+- Editing an order reuses the creation validator. On a rejected order only
+  the fabric roll and fabric used may change, so the wastage recorded at
+  approval reflects the re-cut while the batch the verifier counted stays
+  fixed.
 
-**TODO (Day 3–4):** the verifier hard stop (`422` when any component is RED,
-missing or uncounted), the immutable audit log write on approval, and the
-Sewing Queue query isolation (`WHERE status = 'VERIFIED'`).
+### 4.8 Automated tests
+
+`npm test` runs 180 tests in about five seconds. The API tests call the real
+route handlers against an in-memory Postgres (PGlite) built from the same
+three migrations as production, so the constraints and triggers are
+exercised, not mocked.
+
+| File | Tests | Covers |
+| ---- | ----- | ------ |
+| `tests/order-rules.test.ts` | 7 | Multiplier engine, wastage formula, state machine |
+| `tests/order-input.test.ts` | 41 | Order input validation and strict number parsing |
+| `tests/orders-api.test.ts` | 56 | Sign-in, forged cookies, order creation, submission, edit, delete, role checks |
+| `tests/verification-api.test.ts` | 50 | Traffic lights, hard stop, rejection, role checks, triggers |
+| `tests/sewing-api.test.ts` | 26 | Queue isolation, start of sewing, role checks, sewing database rules |
+
+The five tests required by the brief:
+
+| Brief | Test name | File |
+| ----- | --------- | ---- |
+| Test 1 | "Test 1: lets a verifier approve an order with all GREEN components" | `verification-api.test.ts` |
+| Test 2 | "Test 2: blocks approval with 422 when one component is RED" | `verification-api.test.ts` |
+| Test 3 | "Test 3: refuses a rejection with ..." (six kinds of missing or blank note) | `verification-api.test.ts` |
+| Test 4 | "Test 4: returns 403 when a ... tries to approve" (supervisor and sewing) | `verification-api.test.ts` |
+| Test 5 | "Test 5: never returns an order that is not VERIFIED" | `sewing-api.test.ts` |
+
+Beyond those, the suites attack the rules directly: approving with a forged
+`{"status": "VERIFIED"}` body, two simultaneous approvals, widening the
+Sewing Queue with query strings, and bypassing the API with raw `UPDATE`,
+`DELETE` and `TRUNCATE` statements that the triggers must refuse.
+
+## 5. Human-in-the-Loop Notes and Reflections
+
+> **To be completed by me.** The headings below are a structure for my own
+> notes; the bullet points list the moments worth writing about.
+
+### 5.1 Decisions I made and why
+
+- **Role Switcher.** I had it removed as a security concern, then restored
+  it after re-reading the brief's audit checklist ("Switch to Verifier").
+  _My reasoning:_ TODO
+- **Edit and delete for cutting orders.** Not required by the brief. Kept in
+  full for unsubmitted orders and limited to fabric details on rejected
+  ones. _My reasoning:_ TODO
+- **`sewing_started_at` instead of a fifth status.** _My reasoning:_ TODO
+- **Database triggers beyond the audit log.** The AI proposed enforcing the
+  hard stop and the state machine in the database as well. _Why I accepted
+  it:_ TODO
+
+### 5.2 What I reviewed by hand, and what I found
+
+TODO
+
+### 5.3 Bug-fix insights
+
+What the defects in section 2 have in common, and what I would check first
+next time.
+
+TODO
+
+### 5.4 Reflections on working with AI
+
+What it did well, where it needed steering, and what I would do differently.
+
+TODO
