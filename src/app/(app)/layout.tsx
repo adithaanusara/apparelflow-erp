@@ -53,23 +53,27 @@ export default async function AppLayout({
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <div className="flex w-full flex-wrap items-center gap-x-4 gap-y-3 sm:w-auto">
             <RoleSwitcher currentRole={session.role} />
-            <div className="flex items-center gap-3">
+            <div className="flex w-full items-center gap-3 sm:w-auto">
               <span
                 aria-hidden="true"
                 className="grid size-9 place-items-center rounded-full bg-white/15 text-xs font-bold tracking-wide ring-1 ring-white/25"
               >
                 {initials}
               </span>
-              <p className="text-sm leading-tight">
+              <p className="min-w-0 text-sm leading-tight">
                 <span className="sr-only">Signed in as </span>
                 <span className="block font-semibold">{session.fullName}</span>
                 <span className="block text-xs text-slate-300">
                   {ROLE_LABELS[session.role]}
                 </span>
               </p>
-              <SignOutButton />
+              {/* Pushed to the far edge on a phone, where this row is full
+                  width. */}
+              <div className="ml-auto shrink-0 sm:ml-0">
+                <SignOutButton />
+              </div>
             </div>
           </div>
         </div>

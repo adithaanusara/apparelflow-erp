@@ -15,7 +15,7 @@ export function SignOutButton() {
     <button
       type="button"
       onClick={signOut}
-      className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-100 ring-1 ring-white/25 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+      className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold whitespace-nowrap text-slate-100 ring-1 ring-white/25 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
     >
       <svg
         aria-hidden="true"
