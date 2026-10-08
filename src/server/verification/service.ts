@@ -1,4 +1,5 @@
 import { and, count, desc, eq } from "drizzle-orm";
+import { expectedComponentQty } from "../../lib/order-rules";
 import {
   approvalBlockers,
   checkActualQty,
@@ -8,6 +9,8 @@ import {
 import type { Database } from "../db/client";
 import {
   cuttingOrders,
+  recipeComponents,
+  users,
   verificationItems,
   verificationLogs,
 } from "../db/schema";
@@ -86,6 +89,80 @@ async function loadSummary(tx: Database, orderId: number) {
   return (await findOrderSummary(tx, orderId)) as OrderSummary;
 }
 
+// The session says who is signing; this confirms they may still sign. A
+// session outlives a role change by up to its lifetime, and a decision is
+// the one write that must not be made on a stale role.
+async function requireCurrentVerifier(tx: Database, userId: number) {
+  const [user] = await tx
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.id, userId));
+  if (!user) {
+    throw new HttpError(401, "UNAUTHENTICATED", "Sign in to continue.");
+  }
+  if (user.role !== "cutting_verifier") {
+    throw new HttpError(
+      403,
+      "FORBIDDEN",
+      "Your role is not allowed to perform this action.",
+    );
+  }
+}
+
+type ChecklistBlocker = { componentId: number; name: string; reason: string };
+
+// Compares the order's checklist with its recipe. A batch is only complete
+// when every recipe component is on the checklist with the quantity the batch
+// size requires, so a component that is missing from the checklist blocks
+// approval exactly as a shortage does.
+async function checklistBlockers(
+  tx: Database,
+  order: OrderSummary,
+): Promise<ChecklistBlocker[]> {
+  const components = await tx
+    .select({
+      id: recipeComponents.id,
+      name: recipeComponents.componentName,
+      piecesPerGarment: recipeComponents.piecesPerGarment,
+    })
+    .from(recipeComponents)
+    .where(eq(recipeComponents.recipeId, order.recipe.id));
+  const itemByComponent = new Map(
+    order.items.map((item) => [item.componentId, item]),
+  );
+
+  const blockers: ChecklistBlocker[] = [];
+  for (const { id, name, piecesPerGarment } of components) {
+    const item = itemByComponent.get(id);
+    const required = expectedComponentQty(order.targetQty, piecesPerGarment);
+    if (!item) {
+      blockers.push({
+        componentId: id,
+        name,
+        reason: "Missing from the checklist.",
+      });
+    } else if (item.expectedQty !== required) {
+      blockers.push({
+        componentId: id,
+        name,
+        reason: `The checklist expects ${item.expectedQty}, but the recipe requires ${required}.`,
+      });
+    }
+  }
+
+  const inRecipe = new Set(components.map((component) => component.id));
+  for (const item of order.items) {
+    if (!inRecipe.has(item.componentId)) {
+      blockers.push({
+        componentId: item.componentId,
+        name: item.componentName,
+        reason: "Not a component of this order's recipe.",
+      });
+    }
+  }
+  return blockers;
+}
+
 // Stores the verifier's counts. The traffic-light status is always computed
 // here from the stored expected quantity; a status sent by the client is
 // never read.
@@ -139,20 +216,27 @@ export async function saveCounts(
 }
 
 // The gatekeeper. Decides from the counts stored in the database, inside the
-// same transaction that writes the result: if any component is uncounted or
-// short the request ends with 422 and nothing changes. On success the status
-// change and the audit log are written together or not at all.
+// same transaction that writes the result: if any component is missing,
+// uncounted or short the request ends with 422 and nothing changes. On
+// success the audit log and the status change are written together or not at
+// all.
 export async function approveOrder(
   db: Database,
   orderId: number,
   verifierId: number,
 ): Promise<OrderSummary> {
   return db.transaction(async (tx) => {
+    await requireCurrentVerifier(tx, verifierId);
     await lockPendingOrder(tx, orderId);
     const order = await loadSummary(tx, orderId);
 
+    const mismatches = await checklistBlockers(tx, order);
     const blockers = approvalBlockers(order.items);
-    if (order.items.length === 0 || blockers.length > 0) {
+    if (
+      order.items.length === 0 ||
+      mismatches.length > 0 ||
+      blockers.length > 0
+    ) {
       const nameOf = new Map(
         order.items.map((item) => [item.componentId, item.componentName]),
       );
@@ -161,26 +245,37 @@ export async function approveOrder(
         "APPROVAL_BLOCKED",
         order.items.length === 0
           ? "Approval blocked: this order has no components to verify."
-          : `Approval blocked: ${blockers.length} of ${order.items.length} components are short or not counted.`,
-        Object.fromEntries(
-          blockers.map(({ componentId, reason }) => [
+          : mismatches.length > 0
+            ? "Approval blocked: the checklist for this order does not match its recipe."
+            : `Approval blocked: ${blockers.length} of ${order.items.length} components are short or not counted.`,
+        // A checklist problem is listed last so it is the reason shown for a
+        // component that is also short or uncounted.
+        Object.fromEntries([
+          ...blockers.map(({ componentId, reason }) => [
             componentId,
             `${nameOf.get(componentId)}: ${reason}`,
           ]),
-        ),
+          ...mismatches.map(({ componentId, name, reason }) => [
+            componentId,
+            `${name}: ${reason}`,
+          ]),
+        ]),
       );
     }
 
-    await tx
-      .update(cuttingOrders)
-      .set({ status: "VERIFIED", updatedAt: new Date() })
-      .where(eq(cuttingOrders.id, orderId));
+    // The decision is recorded while the order is still at the QC station and
+    // the status moves in the same transaction; the database refuses either
+    // one without the other.
     await tx.insert(verificationLogs).values({
       orderId,
       verifierId,
       decision: "APPROVED",
       wastagePct: order.wastagePct,
     });
+    await tx
+      .update(cuttingOrders)
+      .set({ status: "VERIFIED", updatedAt: new Date() })
+      .where(eq(cuttingOrders.id, orderId));
 
     return loadSummary(tx, orderId);
   });
@@ -203,13 +298,10 @@ export async function rejectOrder(
   }
 
   return db.transaction(async (tx) => {
+    await requireCurrentVerifier(tx, verifierId);
     await lockPendingOrder(tx, orderId);
     const order = await loadSummary(tx, orderId);
 
-    await tx
-      .update(cuttingOrders)
-      .set({ status: "REJECTED", updatedAt: new Date() })
-      .where(eq(cuttingOrders.id, orderId));
     await tx.insert(verificationLogs).values({
       orderId,
       verifierId,
@@ -217,6 +309,10 @@ export async function rejectOrder(
       rejectionNote: (note as string).trim(),
       wastagePct: order.wastagePct,
     });
+    await tx
+      .update(cuttingOrders)
+      .set({ status: "REJECTED", updatedAt: new Date() })
+      .where(eq(cuttingOrders.id, orderId));
 
     return loadSummary(tx, orderId);
   });

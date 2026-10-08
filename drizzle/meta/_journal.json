@@ -29,6 +29,13 @@
       "when": 1791426152311,
       "tag": "0003_sewing_completion",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791441510876,
+      "tag": "0004_signoff_integrity",
+      "breakpoints": true
     }
   ]
 }
