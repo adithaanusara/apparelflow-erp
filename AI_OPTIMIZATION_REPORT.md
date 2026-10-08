@@ -10,6 +10,7 @@ wrong, and how it was corrected.
 | ---- | -------- |
 | Claude Code (Claude Opus, VS Code extension) | Day 1-2: project scaffold, Drizzle schema, migration, seed script, session/role-guard layer, order creation API and service, order dialog UI, input validation, Vitest suites, README updates |
 | Claude Code (Claude Opus, VS Code extension) | Day 3-4: traffic-light rules, verification service and API, hard-stop logic, database triggers, Verifier Terminal UI, order edit/delete, Sewing Queue query/API/UI, sewing handoff migration, tests, README schema documentation |
+| Claude Code (Claude Opus, VS Code extension) | UI redesign after the Day 4 feature work: enterprise UI redesign, card-based dashboards, interactive summary metrics, search bar on every workspace, Sri Lanka time localization, and the sewing completion endpoint |
 
 **Prompting Approach:**
 The work was driven iteratively using the challenge brief. I provided one clear milestone per session (e.g., "Day 1: Scaffold and Database" and "Day 2: Auth and Orders"). Before accepting any AI-generated code, I manually reviewed the logic, specifically checking database constraints, contrast/accessibility guidelines, and error handling, and instructed the AI to fix any edge cases before moving forward.
@@ -99,6 +100,20 @@ found by running the application rather than by reading it.
 | d | **Status badges clipped on a phone** in the read-only count tables ("GREE" instead of "GREEN · Match"). | `src/app/(app)/sewing/page.tsx`, `src/app/(app)/cutting/page.tsx` | Screenshot at phone width on Day 4, plus a scripted check that no table is wider than its container. | The badge shows only the colour word on narrow screens, and the supervisor's table hides its per-garment column there. |
 | e | **The AI's test setup broke my running dev server.** To test in a browser without writing to the Neon database, the AI temporarily patched `src/server/db/client.ts` in the working folder. My own `next dev` was running from the same folder and picked the patch up, so pages returned server errors for about a minute. | Process error, not committed code | The AI's second dev server refused to start because mine was already running, which exposed the conflict. | The patch was reverted immediately. All later browser checks ran from a separate copy of the project. |
 
+### 2.4 Crowded Action Buttons & Half-Width Cards
+
+**Where:** `src/app/(app)/cutting/orders-dashboard.tsx`,
+`src/app/(app)/verification/verifier-workspace.tsx` and
+`src/app/(app)/sewing/sewing-workspace.tsx`.
+
+**What the AI generated:** When adding the "Edit" and "Delete" buttons with icons, the AI placed them in a flex container with only a 10px gap (`gap-2.5`). Additionally, the new order cards were laid out in a two-column grid, so a single card filled only the left half of the page and left an awkward blank area on the right.
+
+**The defect:** The buttons sat too close together, increasing the risk of accidental destructive actions (e.g., hitting Delete instead of Edit). The UI looked unpolished and did not utilize the desktop real estate properly.
+
+**How it was caught:** Visual inspection during my manual browser testing. Neither issue was reported by lint, type-checking or the automated tests.
+
+**Fix:** I instructed the AI to add a wider Tailwind spacing utility between the buttons (`gap-4`) and to make the cards use the full width of their container. The verifier's pending cards now sit in a single full-width column, and in the Sewing Queue a card with no neighbour spans both columns.
+
 ## 3. Human Refactoring & Architectural Hardening
 
 I did not treat AI output as production-ready. Each item below is a place
@@ -187,8 +202,8 @@ A request passes through the same layers in the same order on every endpoint:
 | Endpoints | Role allowed |
 | --------- | ------------ |
 | `/api/orders`, `/api/orders/:id`, `/api/orders/:id/submit`, `/api/recipes` | `cutting_supervisor` |
-| `/api/verification/orders`, `.../:id/counts`, `.../:id/approve`, `.../:id/reject` | `cutting_verifier` |
-| `/api/sewing/queue`, `/api/sewing/queue/:id/start` | `sewing_supervisor` |
+| `/api/verification/orders`, `.../:id/counts`, `.../:id/approve`, `.../:id/reject`, `/api/verification/history` | `cutting_verifier` |
+| `/api/sewing/queue`, `/api/sewing/queue/:id/start`, `/api/sewing/queue/:id/complete` | `sewing_supervisor` |
 
 ### 4.4 Verification API and the hard stop
 
@@ -227,6 +242,8 @@ gatekeeper triggers (`drizzle/0001_gatekeeper_triggers.sql`,
   status transitions and protect verified data.
 - Sewing triggers ensure start timestamps and users are permanent once
   recorded.
+- `drizzle/0003_sewing_completion.sql` adds schema support and traceability
+  columns to accurately track the completion of sewing batches.
 
 ### 4.6 Sewing Queue isolation
 
@@ -256,9 +273,9 @@ gatekeeper triggers (`drizzle/0001_gatekeeper_triggers.sql`,
 
 ### 4.8 Automated tests
 
-`npm test` runs 180 tests in about five seconds. The API tests call the real
+`npm test` runs 229 tests in about five seconds. The API tests call the real
 route handlers against an in-memory Postgres (PGlite) built from the same
-three migrations as production, so the constraints and triggers are
+four migrations as production, so the constraints and triggers are
 exercised, not mocked.
 
 | File | Tests | Covers |
@@ -266,8 +283,10 @@ exercised, not mocked.
 | `tests/order-rules.test.ts` | 7 | Multiplier engine, wastage formula, state machine |
 | `tests/order-input.test.ts` | 41 | Order input validation and strict number parsing |
 | `tests/orders-api.test.ts` | 56 | Sign-in, forged cookies, order creation, submission, edit, delete, role checks |
-| `tests/verification-api.test.ts` | 50 | Traffic lights, hard stop, rejection, role checks, triggers |
-| `tests/sewing-api.test.ts` | 26 | Queue isolation, start of sewing, role checks, sewing database rules |
+| `tests/verification-api.test.ts` | 56 | Traffic lights, hard stop, rejection, role checks, triggers |
+| `tests/sewing-api.test.ts` | 37 | Queue isolation, start and completion of sewing, role checks, sewing database rules |
+| `tests/format-date.test.ts` | 9 | Timezone localization and 12-hour AM/PM formatting for Asia/Colombo |
+| `tests/order-search.test.ts` | 23 | Universal free-text search matching across different order properties |
 
 The five tests required by the brief:
 
@@ -299,3 +318,12 @@ AI-generated code generally handles happy paths well, but subtle edge cases—su
 ### 5.4 Reflections on working with AI
 
 While the AI excelled at rapidly bootstrapping codebases, generating comprehensive test suites, and setting up API endpoints, it required strict steering for fine-grained business logic and real-world UI/UX edge cases. Combining rapid AI code generation with hands-on architectural refactoring and manual testing ensured the system met high professional standards.
+
+## 6. Enterprise UI Redesign & Dashboard Optimization
+
+To elevate the application from a functional prototype to a production-ready enterprise tool, I directed several major UX improvements, which the AI implemented:
+
+* **Card-Based Interface:** Rebuilt the Cutting Verifier and Sewing Supervisor workspaces from long stacked records into compact summary cards, with the full record (count tables and audit history) opened in a dialog, significantly enhancing readability on the factory floor. The Cutting Supervisor's order table became a dashboard with status tabs and expandable rows.
+* **Interactive Summary Metrics:** Implemented dynamic, clickable top-level summary cards (e.g., Pending, Approved, Rejected). These act as filters for the list below them, removing the need for cluttered side-panels.
+* **Universal Search Functionality:** Integrated a real-time, free-text search bar on all three workspaces. This allows a user to instantly filter the open view by Order Number, Product Name, or the Supervisor's or Verifier's Name.
+* **Timezone Localization:** Replaced the per-page UTC date formatting with one shared timestamp utility (`src/lib/format-date.ts`) that displays every event in Sri Lanka Standard Time (`Asia/Colombo`) using a highly readable 12-hour AM/PM format, ensuring the UI reflects the actual physical location of the factory. Timestamps are still stored in UTC.
