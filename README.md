@@ -99,11 +99,13 @@ All bodies are JSON. Errors have the shape
 | `DELETE /api/orders/:id`      | cutting_supervisor | Deletes an order that was never submitted (`CUTTING_IN_PROGRESS`). `409` otherwise |
 | `POST /api/orders/:id/submit` | cutting_supervisor | Moves `CUTTING_IN_PROGRESS` or `REJECTED` to `PENDING_VERIFICATION`. `409` from any other status |
 | `GET /api/verification/orders` | cutting_verifier  | Orders in `PENDING_VERIFICATION` only |
+| `GET /api/verification/history` | cutting_verifier  | Counts of pending batches and of the signed-in verifier's own approvals and rejections, plus their most recent approvals and rejections (up to 25 of each) |
 | `PUT /api/verification/orders/:id/counts` | cutting_verifier | Saves counts as `{ "counts": [{ "componentId", "actualQty" }] }`. The server derives each traffic light |
 | `POST /api/verification/orders/:id/approve` | cutting_verifier | Moves the order to `VERIFIED` and writes the audit log. `422` if any component is RED, missing or uncounted |
 | `POST /api/verification/orders/:id/reject` | cutting_verifier | Body `{ "note" }`. Moves the order to `REJECTED`. `422` without a note |
 | `GET /api/sewing/queue`       | sewing_supervisor  | `VERIFIED` batches only, with piece counts, verifier sign-off, stored wastage % and earlier rejection notes |
 | `POST /api/sewing/queue/:id/start` | sewing_supervisor | Records "Start Sewing Assembly" (who and when). `409` if already started; `404` for any order that is not `VERIFIED` |
+| `POST /api/sewing/queue/:id/complete` | sewing_supervisor | Records that sewing is finished (who and when). `409` if not started or already completed; `404` for any order that is not `VERIFIED` |
 
 Any other role calling a verification or sewing endpoint gets `403`.
 
@@ -155,6 +157,11 @@ On approval the verifier id, timestamp and wastage % are written to
   rule stays literally `status = 'VERIFIED'`. The database only accepts a
   start on a `VERIFIED` order and makes the start record permanent
   (`drizzle/0002_sewing_handoff.sql`).
+- Finishing a batch is recorded the same way, as `sewing_completed_at` and
+  `sewing_completed_by`. The database refuses a completion on a batch that
+  was never started and makes the completion record permanent
+  (`drizzle/0003_sewing_completion.sql`). The Sewing workspace groups the
+  verified batches into In Queue, In Sewing and Completed from these fields.
 
 ## Database schema
 
@@ -165,6 +172,7 @@ applied by the SQL migrations in `drizzle/`.
 erDiagram
     users ||--o{ cutting_orders : "creates"
     users ||--o{ cutting_orders : "starts sewing on"
+    users ||--o{ cutting_orders : "completes sewing on"
     users ||--o{ verification_logs : "signs"
     recipes ||--|{ recipe_components : "has"
     recipes ||--o{ cutting_orders : "is cut as"
@@ -236,11 +244,14 @@ Belongs to a recipe. Five components are seeded for each recipe.
 | `updated_at`        | `timestamptz`   | required, default `now()`                      |
 | `sewing_started_at` | `timestamptz`   | optional; only allowed when status is `VERIFIED` |
 | `sewing_started_by` | `integer`       | optional; references `users`; set together with `sewing_started_at` |
+| `sewing_completed_at` | `timestamptz` | optional; only allowed after `sewing_started_at`, and not earlier than it |
+| `sewing_completed_by` | `integer`     | optional; references `users`; set together with `sewing_completed_at` |
 
 Belongs to a recipe and a user; has many verification items and logs.
 Trigger `cutting_orders_guard` enforces the state machine and freezes a
-`VERIFIED` order; `cutting_orders_sewing_start_is_permanent` makes the sewing
-start record unchangeable.
+`VERIFIED` order; `cutting_orders_sewing_start_is_permanent` and
+`cutting_orders_sewing_completion_is_permanent` make the sewing start and
+completion records unchangeable.
 
 ### `verification_items`
 
@@ -282,6 +293,7 @@ most one approval. The table is append-only: triggers refuse `UPDATE`,
 | `drizzle/0000_initial_schema.sql`      | The six tables, enums, constraints and indexes        |
 | `drizzle/0001_gatekeeper_triggers.sql` | Append-only audit log, state machine and hard-stop triggers |
 | `drizzle/0002_sewing_handoff.sql`      | Sewing start columns, their constraints and trigger   |
+| `drizzle/0003_sewing_completion.sql`   | Sewing completion columns, their constraints and trigger |
 
 ## Scripts
 
