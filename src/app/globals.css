@@ -98,9 +98,3 @@ body {
     }
   }
 }
-
-/* The "Pause animation" button on the sign-in page sets this attribute. */
-header[data-motion-paused],
-header[data-motion-paused] * {
-  animation-play-state: paused !important;
-}
