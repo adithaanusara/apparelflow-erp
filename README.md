@@ -5,6 +5,9 @@ ApparelFlow ERP: cutting orders are created from production recipes, verified
 component by component, and released to the Sewing Queue only after an
 authorized verifier signs off.
 
+**Live demo:** <https://apparelflow-erp-fawn.vercel.app> (sign in with any of
+the [demo credentials](#demo-credentials) below).
+
 > **Status:** all three workspaces are built: the Cutting Supervisor's order
 > engine, the Verification Terminal with its hard stop, and the Sewing Queue.
 
