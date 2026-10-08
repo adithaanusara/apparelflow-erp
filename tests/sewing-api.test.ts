@@ -34,6 +34,8 @@ const { POST: rejectRoute } =
 const { GET: queueRoute } = await import("@/app/api/sewing/queue/route");
 const { POST: startRoute } =
   await import("@/app/api/sewing/queue/[id]/start/route");
+const { POST: completeRoute } =
+  await import("@/app/api/sewing/queue/[id]/complete/route");
 
 const cookies = {} as Record<Role, string>;
 const userIds = {} as Record<Role, number>;
@@ -357,6 +359,95 @@ describe("POST /api/sewing/queue/:id/start", () => {
   });
 });
 
+describe("POST /api/sewing/queue/:id/complete", () => {
+  const complete = (role: Role | null, id: number | string, body?: unknown) =>
+    completeRoute(
+      request(`/api/sewing/queue/${id}/complete`, "POST", role, body),
+      ctx(id),
+    );
+  const rowOf = async (id: number) =>
+    (await db.select().from(cuttingOrders).where(eq(cuttingOrders.id, id)))[0];
+  const batchOf = async (id: number) =>
+    ((await queue()).body.batches as SewingBatch[]).find(
+      (candidate) => candidate.id === id,
+    )!;
+
+  it("records who completed sewing and when, from the session", async () => {
+    const order = await orderIn("VERIFIED");
+    await start("sewing_supervisor", order.id);
+    const response = await complete("sewing_supervisor", order.id, {
+      completedBy: userIds.cutting_verifier,
+      sewingCompletedAt: "2000-01-01T00:00:00Z",
+    });
+    expect(response.status).toBe(200);
+
+    const row = await rowOf(order.id);
+    expect(row.status).toBe("VERIFIED");
+    expect(row.sewingCompletedBy).toBe(userIds.sewing_supervisor);
+    expect(row.sewingCompletedAt!.getTime()).toBeGreaterThanOrEqual(
+      row.sewingStartedAt!.getTime(),
+    );
+    expect(Date.now() - row.sewingCompletedAt!.getTime()).toBeLessThan(60_000);
+
+    // Still in the queue query, now with its completion record.
+    expect((await batchOf(order.id)).completion).toMatchObject({
+      completedByName: "Demo Sewing Supervisor",
+    });
+  });
+
+  it("refuses to complete a batch that has not been started", async () => {
+    const order = await orderIn("VERIFIED");
+    const response = await complete("sewing_supervisor", order.id);
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe("NOT_STARTED");
+    expect((await rowOf(order.id)).sewingCompletedAt).toBeNull();
+    expect((await batchOf(order.id)).completion).toBeNull();
+  });
+
+  it("can only be completed once, even for simultaneous requests", async () => {
+    const order = await orderIn("VERIFIED");
+    await start("sewing_supervisor", order.id);
+    const statuses = (
+      await Promise.all([
+        complete("sewing_supervisor", order.id),
+        complete("sewing_supervisor", order.id),
+      ])
+    ).map((response) => response.status);
+    expect(statuses.sort()).toEqual([200, 409]);
+
+    const again = await complete("sewing_supervisor", order.id);
+    expect(again.status).toBe(409);
+    expect((await again.json()).error.code).toBe("ALREADY_COMPLETED");
+  });
+
+  it.each(["CUTTING_IN_PROGRESS", "PENDING_VERIFICATION", "REJECTED"] as const)(
+    "answers 404 for a %s order, exactly as for one that does not exist",
+    async (status) => {
+      const order = await orderIn(status);
+      const hidden = await complete("sewing_supervisor", order.id);
+      const missing = await complete("sewing_supervisor", 999_999);
+      expect(hidden.status).toBe(404);
+      expect(await hidden.json()).toEqual(await missing.json());
+    },
+  );
+
+  it.each(["cutting_supervisor", "cutting_verifier"] as const)(
+    "returns 403 for %s",
+    async (role) => {
+      const order = await orderIn("VERIFIED");
+      await start("sewing_supervisor", order.id);
+      expect((await complete(role, order.id)).status).toBe(403);
+      expect((await rowOf(order.id)).sewingCompletedAt).toBeNull();
+    },
+  );
+
+  it("returns 401 without a session", async () => {
+    const order = await orderIn("VERIFIED");
+    await start("sewing_supervisor", order.id);
+    expect((await complete(null, order.id)).status).toBe(401);
+  });
+});
+
 // Direct writes that bypass the API.
 describe("sewing start database rules", () => {
   async function rejectionMessage(
@@ -432,5 +523,59 @@ describe("sewing start database rules", () => {
           .where(eq(verificationItems.orderId, order.id)),
       ),
     ).toMatch(/immutable/);
+  });
+
+  it("refuses a completion on a batch that was never started", async () => {
+    const order = await orderIn("VERIFIED");
+    const write = db
+      .update(cuttingOrders)
+      .set({
+        sewingCompletedAt: new Date(),
+        sewingCompletedBy: userIds.sewing_supervisor,
+      })
+      .where(eq(cuttingOrders.id, order.id));
+    expect(await rejectionMessage(write)).toMatch(
+      /cutting_orders_sewing_completed_after_start/,
+    );
+  });
+
+  it("refuses a completion with no user recorded, and makes a completion permanent", async () => {
+    const order = await orderIn("VERIFIED");
+    await start("sewing_supervisor", order.id);
+    const row = eq(cuttingOrders.id, order.id);
+
+    expect(
+      await rejectionMessage(
+        db
+          .update(cuttingOrders)
+          .set({ sewingCompletedAt: new Date() })
+          .where(row),
+      ),
+    ).toMatch(/cutting_orders_sewing_completion_attributed/);
+
+    await completeRoute(
+      request(
+        `/api/sewing/queue/${order.id}/complete`,
+        "POST",
+        "sewing_supervisor",
+      ),
+      ctx(order.id),
+    );
+    expect(
+      await rejectionMessage(
+        db
+          .update(cuttingOrders)
+          .set({ sewingCompletedAt: null, sewingCompletedBy: null })
+          .where(row),
+      ),
+    ).toMatch(/completion record cannot be changed/);
+    expect(
+      await rejectionMessage(
+        db
+          .update(cuttingOrders)
+          .set({ sewingCompletedBy: userIds.cutting_supervisor })
+          .where(row),
+      ),
+    ).toMatch(/completion record cannot be changed/);
   });
 });

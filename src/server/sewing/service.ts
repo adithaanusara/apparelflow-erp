@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull } from "drizzle-orm";
 import { expectedFabricYards } from "../../lib/order-rules";
 import type { ItemStatus } from "../../lib/verification-rules";
 import type { Database } from "../db/client";
@@ -33,6 +33,7 @@ export type SewingBatch = {
   // Earlier rejections of this batch, oldest first.
   rejections: { verifierName: string; at: string; note: string }[];
   sewing: { startedByName: string; at: string } | null;
+  completion: { completedByName: string; at: string } | null;
 };
 
 // The Sewing Queue. `status = 'VERIFIED'` is written into the query here and
@@ -45,6 +46,7 @@ export async function listSewingQueue(db: Database): Promise<SewingBatch[]> {
     with: {
       recipe: true,
       sewingStarter: { columns: { fullName: true } },
+      sewingCompleter: { columns: { fullName: true } },
       items: {
         orderBy: asc(verificationItems.componentId),
         with: { component: true },
@@ -101,6 +103,13 @@ export async function listSewingQueue(db: Database): Promise<SewingBatch[]> {
               at: order.sewingStartedAt.toISOString(),
             }
           : null,
+      completion:
+        order.sewingCompletedAt && order.sewingCompleter
+          ? {
+              completedByName: order.sewingCompleter.fullName,
+              at: order.sewingCompletedAt.toISOString(),
+            }
+          : null,
     };
   });
 }
@@ -145,5 +154,54 @@ export async function startSewing(
     409,
     "ALREADY_STARTED",
     "Sewing assembly has already been started for this batch.",
+  );
+}
+
+// Records that sewing is finished. As with the start, the conditions are part
+// of the UPDATE: the batch must be VERIFIED, already started and not yet
+// completed, so it can be completed only once and never before it began.
+export async function completeSewing(
+  db: Database,
+  orderId: number,
+  completedBy: number,
+): Promise<void> {
+  const completed = await db
+    .update(cuttingOrders)
+    .set({ sewingCompletedAt: new Date(), sewingCompletedBy: completedBy })
+    .where(
+      and(
+        eq(cuttingOrders.id, orderId),
+        eq(cuttingOrders.status, "VERIFIED"),
+        isNotNull(cuttingOrders.sewingStartedAt),
+        isNull(cuttingOrders.sewingCompletedAt),
+      ),
+    )
+    .returning({ id: cuttingOrders.id });
+  if (completed.length > 0) return;
+
+  const [verified] = await db
+    .select({
+      startedAt: cuttingOrders.sewingStartedAt,
+      completedAt: cuttingOrders.sewingCompletedAt,
+    })
+    .from(cuttingOrders)
+    .where(
+      and(eq(cuttingOrders.id, orderId), eq(cuttingOrders.status, "VERIFIED")),
+    );
+  // As in startSewing: an unverified order is indistinguishable from one
+  // that does not exist.
+  if (!verified) {
+    throw new HttpError(
+      404,
+      "NOT_FOUND",
+      "Batch not found in the Sewing Queue.",
+    );
+  }
+  throw new HttpError(
+    409,
+    verified.completedAt ? "ALREADY_COMPLETED" : "NOT_STARTED",
+    verified.completedAt
+      ? "This batch has already been marked as completed."
+      : "Sewing has not been started for this batch yet.",
   );
 }

@@ -113,6 +113,12 @@ export const cuttingOrders = pgTable(
     // so the Sewing Queue rule stays exactly status = 'VERIFIED'.
     sewingStartedAt: timestamp("sewing_started_at", { withTimezone: true }),
     sewingStartedBy: integer("sewing_started_by").references(() => users.id),
+    // Set when the sewing floor reports the batch finished. Like the start,
+    // it is recorded beside the status, which stays VERIFIED.
+    sewingCompletedAt: timestamp("sewing_completed_at", { withTimezone: true }),
+    sewingCompletedBy: integer("sewing_completed_by").references(
+      () => users.id,
+    ),
   },
   (t) => [
     index("cutting_orders_status_idx").on(t.status),
@@ -123,6 +129,15 @@ export const cuttingOrders = pgTable(
     check(
       "cutting_orders_sewing_start_attributed",
       sql`(${t.sewingStartedAt} IS NULL) = (${t.sewingStartedBy} IS NULL)`,
+    ),
+    check(
+      "cutting_orders_sewing_completion_attributed",
+      sql`(${t.sewingCompletedAt} IS NULL) = (${t.sewingCompletedBy} IS NULL)`,
+    ),
+    // A batch cannot be finished before it was started.
+    check(
+      "cutting_orders_sewing_completed_after_start",
+      sql`${t.sewingCompletedAt} IS NULL OR (${t.sewingStartedAt} IS NOT NULL AND ${t.sewingCompletedAt} >= ${t.sewingStartedAt})`,
     ),
     check("cutting_orders_target_qty_positive", sql`${t.targetQty} > 0`),
     check(
@@ -207,6 +222,7 @@ export const verificationLogs = pgTable(
 export const usersRelations = relations(users, ({ many }) => ({
   orders: many(cuttingOrders, { relationName: "creator" }),
   sewingStarts: many(cuttingOrders, { relationName: "sewingStarter" }),
+  sewingCompletions: many(cuttingOrders, { relationName: "sewingCompleter" }),
   verifications: many(verificationLogs),
 }));
 
@@ -241,6 +257,11 @@ export const cuttingOrdersRelations = relations(
       fields: [cuttingOrders.sewingStartedBy],
       references: [users.id],
       relationName: "sewingStarter",
+    }),
+    sewingCompleter: one(users, {
+      fields: [cuttingOrders.sewingCompletedBy],
+      references: [users.id],
+      relationName: "sewingCompleter",
     }),
     items: many(verificationItems),
     logs: many(verificationLogs),

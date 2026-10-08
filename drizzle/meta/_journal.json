@@ -22,6 +22,13 @@
       "when": 1791307011468,
       "tag": "0002_sewing_handoff",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791426152311,
+      "tag": "0003_sewing_completion",
+      "breakpoints": true
     }
   ]
 }
