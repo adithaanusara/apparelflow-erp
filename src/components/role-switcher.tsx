@@ -34,7 +34,7 @@ export function RoleSwitcher({ currentRole }: { currentRole: Role }) {
       <div
         role="group"
         aria-label="Switch demo role"
-        className="inline-flex flex-wrap overflow-hidden rounded-md border border-slate-500 bg-white"
+        className="inline-flex flex-wrap gap-1 rounded-xl bg-white/10 p-1 ring-1 ring-white/15"
       >
         {DEMO_ACCOUNTS.map(({ role }) => {
           const active = role === currentRole;
@@ -45,10 +45,10 @@ export function RoleSwitcher({ currentRole }: { currentRole: Role }) {
               aria-pressed={active}
               disabled={switchingTo !== null}
               onClick={() => switchTo(role)}
-              className={`px-3 py-1.5 text-sm font-semibold focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-700 disabled:cursor-wait ${
+              className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white disabled:cursor-wait ${
                 active
-                  ? "bg-slate-900 text-white"
-                  : "bg-white text-slate-900 hover:bg-slate-200"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-100 hover:bg-white/10 hover:text-white"
               }`}
             >
               {switchingTo === role ? "Switching…" : ROLE_LABELS[role]}
@@ -57,7 +57,7 @@ export function RoleSwitcher({ currentRole }: { currentRole: Role }) {
         })}
       </div>
       {error && (
-        <p role="alert" className="mt-1 text-sm font-medium text-red-800">
+        <p role="alert" className="mt-1 text-sm font-medium text-red-200">
           {error}
         </p>
       )}
