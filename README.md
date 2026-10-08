@@ -127,11 +127,23 @@ The rule is enforced in three places, each independent of the one before it:
    or invalid.
 2. **API:** approval reads the counts stored in the database inside a
    transaction that locks the order, ignores the request body, and returns
-   `422` listing the blocking components. The verifier id comes from the
-   session and the timestamp from the database.
-3. **Database triggers** (`drizzle/0001_gatekeeper_triggers.sql`), which hold
-   even for a query that bypasses the API:
+   `422` listing the blocking components. It also compares the checklist with
+   the recipe: a component that is missing from the checklist, or listed with
+   a quantity the recipe does not require, blocks approval exactly as a
+   shortage does. The verifier id comes from the session and the timestamp
+   from the database.
+3. **Database triggers** (`drizzle/0001_gatekeeper_triggers.sql` and
+   `drizzle/0004_signoff_integrity.sql`), which hold even for a query that
+   bypasses the API:
    - an order cannot become `VERIFIED` while a component is uncounted or short;
+   - an order cannot become `VERIFIED` unless its counted checklist matches
+     the recipe exactly: every recipe component present, each with the
+     quantity the batch size requires, and nothing else on it;
+   - the checklist is fixed once the order is submitted: components cannot be
+     added or removed, and an expected quantity can never be edited;
+   - an order cannot become `VERIFIED` or `REJECTED` unless the matching
+     sign-off row is inserted into `verification_logs` in the same
+     transaction, so the audit trail cannot be bypassed;
    - status changes must follow the state machine, and new orders must start
      as `CUTTING_IN_PROGRESS`;
    - `verification_logs` is append-only (no update, delete or truncate);
@@ -140,7 +152,8 @@ The rule is enforced in three places, each independent of the one before it:
 
 On approval the verifier id, timestamp and wastage % are written to
 `verification_logs`; the component count variances are the frozen
-`verification_items` rows.
+`verification_items` rows. The sign-off row and the status change are written
+in one transaction, and the database refuses either one without the other.
 
 ## Sewing Queue isolation
 
@@ -267,7 +280,10 @@ One row per recipe component per order, created with the order.
 
 A check constraint keeps `status` consistent with the counts: both `NULL`, or
 `GREEN` when equal, `YELLOW` when actual is higher, `RED` when lower. Trigger
-`verification_items_guard` freezes the rows of a `VERIFIED` order.
+`verification_items_guard` freezes the rows of a `VERIFIED` order. It also
+fixes the checklist itself: rows can only be added or removed while the order
+is `CUTTING_IN_PROGRESS`, and `expected_qty` can never be edited, so only the
+verifier's count changes after submission.
 
 ### `verification_logs`
 
@@ -280,11 +296,24 @@ The audit trail: one row per approve or reject decision.
 | `decision`       | `verification_decision` | required                                |
 | `rejection_note` | `text`                  | required and non-blank when the decision is `REJECTED` |
 | `wastage_pct`    | `numeric(7,2)`          | required; computed on the server        |
-| `timestamp`      | `timestamptz`           | required, default `now()`               |
+| `timestamp`      | `timestamptz`           | required; always set to the database clock |
 
 An order can have many rejections but, through a partial unique index, at
 most one approval. The table is append-only: triggers refuse `UPDATE`,
 `DELETE` and `TRUNCATE`.
+
+Every row is a sign-off, and triggers (`drizzle/0004_signoff_integrity.sql`)
+tie it to the status change it records:
+
+- a row is only accepted when `verifier_id` is a user whose role is
+  `cutting_verifier` and the order is `PENDING_VERIFICATION`;
+- `timestamp` is overwritten with the database clock, so a decision cannot be
+  backdated;
+- when the transaction commits, the order must have moved to the status the
+  decision says (`APPROVED` to `VERIFIED`, `REJECTED` to `REJECTED`), so a
+  sign-off cannot be left on an order that never moved;
+- in the other direction, an order cannot move to `VERIFIED` or `REJECTED`
+  without a matching sign-off row from the same transaction.
 
 ### Migrations
 
@@ -294,6 +323,7 @@ most one approval. The table is append-only: triggers refuse `UPDATE`,
 | `drizzle/0001_gatekeeper_triggers.sql` | Append-only audit log, state machine and hard-stop triggers |
 | `drizzle/0002_sewing_handoff.sql`      | Sewing start columns, their constraints and trigger   |
 | `drizzle/0003_sewing_completion.sql`   | Sewing completion columns, their constraints and trigger |
+| `drizzle/0004_signoff_integrity.sql`   | Checklist-matches-recipe and signed-decision triggers |
 
 ## Scripts
 
@@ -332,5 +362,5 @@ src/
     db/             Drizzle schema, Neon client, migrate and seed scripts
     http.ts         Error type and route wrapper for consistent API errors
 tests/              Vitest suites and the in-memory test database
-drizzle/            SQL migrations (schema, gatekeeper triggers, sewing handoff)
+drizzle/            SQL migrations (schema, gatekeeper triggers, sewing handoff, sign-off integrity)
 ```
