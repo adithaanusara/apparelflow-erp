@@ -140,7 +140,7 @@ export function VerificationCard({ order }: { order: OrderSummary }) {
   return (
     <article
       aria-labelledby={`${formId}-title`}
-      className="rounded-lg border border-slate-300 bg-white p-5"
+      className="px-5 pt-1 pb-6 sm:px-8 sm:pb-8"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -168,7 +168,7 @@ export function VerificationCard({ order }: { order: OrderSummary }) {
       </div>
 
       {order.latestRejection && (
-        <p className="mt-4 rounded-md border border-amber-700 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+        <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-950 ring-1 ring-amber-700/30">
           <span className="font-semibold">
             Re-cut batch. Previously rejected by{" "}
             {order.latestRejection.verifierName}:
