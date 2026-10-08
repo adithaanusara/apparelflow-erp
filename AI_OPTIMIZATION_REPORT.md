@@ -244,6 +244,9 @@ gatekeeper triggers (`drizzle/0001_gatekeeper_triggers.sql`,
   recorded.
 - `drizzle/0003_sewing_completion.sql` adds schema support and traceability
   columns to accurately track the completion of sewing batches.
+- `drizzle/0004_signoff_integrity.sql` enforces that checklists perfectly
+  match recipes, and ensures status changes are strictly tied to valid,
+  timestamped sign-off logs.
 
 ### 4.6 Sewing Queue isolation
 
@@ -273,9 +276,9 @@ gatekeeper triggers (`drizzle/0001_gatekeeper_triggers.sql`,
 
 ### 4.8 Automated tests
 
-`npm test` runs 229 tests in about five seconds. The API tests call the real
+`npm test` runs 245 tests in about five seconds. The API tests call the real
 route handlers against an in-memory Postgres (PGlite) built from the same
-four migrations as production, so the constraints and triggers are
+five migrations as production, so the constraints and triggers are
 exercised, not mocked.
 
 | File | Tests | Covers |
@@ -283,8 +286,8 @@ exercised, not mocked.
 | `tests/order-rules.test.ts` | 7 | Multiplier engine, wastage formula, state machine |
 | `tests/order-input.test.ts` | 41 | Order input validation and strict number parsing |
 | `tests/orders-api.test.ts` | 56 | Sign-in, forged cookies, order creation, submission, edit, delete, role checks |
-| `tests/verification-api.test.ts` | 56 | Traffic lights, hard stop, rejection, role checks, triggers |
-| `tests/sewing-api.test.ts` | 37 | Queue isolation, start and completion of sewing, role checks, sewing database rules |
+| `tests/verification-api.test.ts` | 71 | Traffic lights, hard stop, rejection, role checks, triggers |
+| `tests/sewing-api.test.ts` | 38 | Queue isolation, start and completion of sewing, role checks, sewing database rules |
 | `tests/format-date.test.ts` | 9 | Timezone localization and 12-hour AM/PM formatting for Asia/Colombo |
 | `tests/order-search.test.ts` | 23 | Universal free-text search matching across different order properties |
 
@@ -306,6 +309,7 @@ The five tests required by the brief:
 - **Edit and delete for cutting orders:** While not explicitly required by the brief, I identified that editing and deleting unsubmitted orders was necessary. When the AI pointed out that a re-cut changes fabric usage, I decided that rejected orders needed a restricted edit flow on fabric fields so that wastage is recalculated correctly on re-cuts.
 - **`sewing_started_at` instead of a fifth status:** Rather than complicating the state machine with a fifth database status, I chose a cleaner architecture by tracking `sewing_started_at` and `sewing_started_by` directly under the existing `VERIFIED` status.
 - **Database triggers beyond the audit log:** The AI proposed enforcing hard stops and the state machine at the database level using triggers. I accepted this approach because the database refuses unauthorized status updates even if the API layer is bypassed.
+- **Note on Threat Model:** The remaining vulnerabilities requiring direct database access—executing `TRUNCATE` on the `verification_items` table, or tampering via the application's database owner connection—were audited but accepted as out of scope, as the security boundaries focus on API-level and application-level role enforcement.
 
 ### 5.2 What I reviewed by hand, and what I found
 
