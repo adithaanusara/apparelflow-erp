@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 import {
   approvalBlockers,
   checkActualQty,
@@ -220,4 +220,94 @@ export async function rejectOrder(
 
     return loadSummary(tx, orderId);
   });
+}
+
+export type VerificationDecision = {
+  id: number;
+  orderNo: string;
+  recipeName: string;
+  recipeCode: string;
+  // The Cutting Supervisor who created the order.
+  supervisorName: string;
+  targetQty: number;
+  decision: "APPROVED" | "REJECTED";
+  rejectionNote: string | null;
+  wastagePct: number;
+  at: string;
+};
+
+export type VerifierOverview = {
+  // Batches waiting at the QC station, whoever ends up verifying them.
+  pending: number;
+  // This verifier's own decisions: totals, and the most recent of each kind.
+  approved: number;
+  rejected: number;
+  history: {
+    approved: VerificationDecision[];
+    rejected: VerificationDecision[];
+  };
+};
+
+const HISTORY_LIMIT = 25;
+
+// The verifier's workspace summary. Decisions are read from the append-only
+// audit log and limited to `verifierId`, which the caller takes from the
+// session: a verifier sees their own sign-offs, not another verifier's.
+export async function getVerifierOverview(
+  db: Database,
+  verifierId: number,
+): Promise<VerifierOverview> {
+  const ownDecisions = eq(verificationLogs.verifierId, verifierId);
+  const latest = (decision: "APPROVED" | "REJECTED") =>
+    db.query.verificationLogs.findMany({
+      where: and(ownDecisions, eq(verificationLogs.decision, decision)),
+      orderBy: desc(verificationLogs.id),
+      limit: HISTORY_LIMIT,
+      with: {
+        order: {
+          with: {
+            recipe: { columns: { name: true, recipeCode: true } },
+            creator: { columns: { fullName: true } },
+          },
+        },
+      },
+    });
+
+  const [pending, totals, approved, rejected] = await Promise.all([
+    db.$count(cuttingOrders, eq(cuttingOrders.status, "PENDING_VERIFICATION")),
+    db
+      .select({ decision: verificationLogs.decision, total: count() })
+      .from(verificationLogs)
+      .where(ownDecisions)
+      .groupBy(verificationLogs.decision),
+    latest("APPROVED"),
+    latest("REJECTED"),
+  ]);
+
+  const totalOf = (decision: "APPROVED" | "REJECTED") =>
+    totals.find((row) => row.decision === decision)?.total ?? 0;
+  const toDecision = (
+    log: Awaited<ReturnType<typeof latest>>[number],
+  ): VerificationDecision => ({
+    id: log.id,
+    orderNo: log.order.orderNo,
+    recipeName: log.order.recipe.name,
+    recipeCode: log.order.recipe.recipeCode,
+    supervisorName: log.order.creator.fullName,
+    targetQty: log.order.targetQty,
+    decision: log.decision,
+    rejectionNote: log.rejectionNote,
+    wastagePct: log.wastagePct,
+    at: log.timestamp.toISOString(),
+  });
+
+  return {
+    pending,
+    approved: totalOf("APPROVED"),
+    rejected: totalOf("REJECTED"),
+    history: {
+      approved: approved.map(toDecision),
+      rejected: rejected.map(toDecision),
+    },
+  };
 }

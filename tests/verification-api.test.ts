@@ -23,6 +23,7 @@ const { GET: pendingOrders } = await import("@/app/api/verification/orders/route
 const { PUT: putCounts } = await import("@/app/api/verification/orders/[id]/counts/route");
 const { POST: approveRoute } = await import("@/app/api/verification/orders/[id]/approve/route");
 const { POST: rejectRoute } = await import("@/app/api/verification/orders/[id]/reject/route");
+const { GET: historyRoute } = await import("@/app/api/verification/history/route");
 
 const cookies = {} as Record<Role, string>;
 const userIds = {} as Record<Role, number>;
@@ -358,6 +359,85 @@ describe("verifier queue", () => {
   it.each(["cutting_supervisor", "sewing_supervisor"] as const)("does not let a %s save counts", async (role) => {
     const order = await pendingOrder();
     expect((await saveCounts(role, order.id, [{ componentId: order.items[0].componentId, actualQty: 50 }])).status).toBe(403);
+  });
+});
+
+describe("GET /api/verification/history", () => {
+  type Entry = { id: number; orderNo: string; decision: string };
+
+  async function history(role: Role | null = "cutting_verifier", query = "") {
+    const response = await historyRoute(request(`/api/verification/history${query}`, "GET", role ? cookies[role] : undefined), undefined);
+    return { status: response.status, body: await response.json() };
+  }
+
+  it("lists the verifier's own approvals and rejections, newest first, with the audit details", async () => {
+    const before = (await history()).body;
+
+    const approved = await countAll(await pendingOrder());
+    await approve("cutting_verifier", approved.id);
+    const rejected = await countAll(await pendingOrder(), { "Sleeve Cuffs": -4 });
+    await reject("cutting_verifier", rejected.id, { note: "Sleeve cuffs short by 4" });
+
+    const { status, body } = await history();
+    expect(status).toBe(200);
+    expect(body.approved).toBe(before.approved + 1);
+    expect(body.rejected).toBe(before.rejected + 1);
+    expect(body.history.rejected[0]).toMatchObject({
+      orderNo: rejected.orderNo,
+      decision: "REJECTED",
+      rejectionNote: "Sleeve cuffs short by 4",
+      recipeName: "Casual Blouse",
+      recipeCode: "REC-BL01",
+      supervisorName: "Demo Cutting Supervisor",
+      targetQty: 50,
+    });
+    expect(body.history.approved[0]).toMatchObject({ orderNo: approved.orderNo, decision: "APPROVED", rejectionNote: null, wastagePct: 5 });
+
+    // Each list holds one kind of decision only, newest first, and is capped.
+    for (const [kind, entries] of [["APPROVED", body.history.approved], ["REJECTED", body.history.rejected]] as [string, Entry[]][]) {
+      expect(entries.every((entry) => entry.decision === kind)).toBe(true);
+      expect(entries.map((entry) => entry.id)).toEqual(entries.map((entry) => entry.id).sort((a, b) => b - a));
+      expect(entries.length).toBeLessThanOrEqual(25);
+    }
+    expect(JSON.stringify(body)).not.toMatch(/hash|verifierId/i);
+  });
+
+  it("counts batches waiting for verification", async () => {
+    const before = (await history()).body.pending;
+    const order = await pendingOrder();
+    expect((await history()).body.pending).toBe(before + 1);
+    await countAll(order);
+    await approve("cutting_verifier", order.id);
+    expect((await history()).body.pending).toBe(before);
+  });
+
+  it("never includes another verifier's decisions, whatever the query string asks for", async () => {
+    const [other] = await db
+      .insert(users)
+      .values({ email: "second.verifier@apparelflow.demo", passwordHash: "not-a-real-hash", role: "cutting_verifier", fullName: "Second Verifier" })
+      .returning();
+    const order = await pendingOrder();
+    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, order.id));
+    await db.insert(verificationLogs).values({ orderId: order.id, verifierId: other.id, decision: "REJECTED", rejectionNote: "Rejected by someone else", wastagePct: 5 });
+
+    const mine = await history();
+    for (const query of [`?verifierId=${other.id}`, "?verifierId=all", `?userId=${other.id}&all=true`]) {
+      const { body } = await history("cutting_verifier", query);
+      expect(body).toEqual(mine.body);
+      expect(JSON.stringify(body)).not.toContain("Rejected by someone else");
+      const listed = [...body.history.approved, ...body.history.rejected].map((entry: Entry) => entry.orderNo);
+      expect(listed).not.toContain(order.orderNo);
+    }
+  });
+
+  it.each(["cutting_supervisor", "sewing_supervisor"] as const)("returns 403 for %s", async (role) => {
+    const { status, body } = await history(role);
+    expect(status).toBe(403);
+    expect(JSON.stringify(body)).not.toMatch(/CO-|history/);
+  });
+
+  it("returns 401 without a session", async () => {
+    expect((await history(null)).status).toBe(401);
   });
 });
 
