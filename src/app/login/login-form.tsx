@@ -70,7 +70,7 @@ export function LoginForm() {
       <div className="overflow-hidden rounded-2xl bg-white shadow-[0_1px_2px_rgb(15_23_42/0.06),0_14px_32px_-10px_rgb(15_23_42/0.14),0_36px_72px_-28px_rgb(30_58_138/0.28)] ring-1 ring-slate-900/[0.05] motion-safe:animate-rise">
         <section
           aria-labelledby="sign-in-heading"
-          className="px-7 pt-7 pb-6 sm:px-9 sm:pt-8 sm:pb-7"
+          className="px-5 pt-7 pb-6 sm:px-9 sm:pt-8 sm:pb-7"
         >
           <p className="flex items-center gap-2 text-xs font-semibold tracking-[0.14em] text-blue-800 uppercase motion-safe:animate-rise motion-safe:[animation-delay:60ms]">
             <span
@@ -93,7 +93,7 @@ export function LoginForm() {
           >
             Welcome back
           </h2>
-          <p className="mt-1.5 text-slate-700 motion-safe:animate-rise motion-safe:[animation-delay:140ms]">
+          <p className="mt-1.5 text-balance text-slate-700 motion-safe:animate-rise motion-safe:[animation-delay:140ms]">
             Sign in to open your ApparelFlow workspace.
           </p>
 
@@ -143,7 +143,7 @@ export function LoginForm() {
                   id="password"
                   type={showPassword ? "text" : "password"}
                   autoComplete="current-password"
-                  placeholder="Enter your password"
+                  placeholder="Enter password"
                   value={password}
                   onChange={(event) => {
                     setPassword(event.target.value);
@@ -218,7 +218,7 @@ export function LoginForm() {
         />
       </div>
 
-      <p className="mt-4 text-center text-xs text-slate-600 motion-safe:animate-fade-in motion-safe:[animation-delay:500ms]">
+      <p className="mt-4 text-center text-xs text-balance text-slate-600 motion-safe:animate-fade-in motion-safe:[animation-delay:500ms]">
         Role permissions are enforced on the server for every request.
       </p>
     </div>

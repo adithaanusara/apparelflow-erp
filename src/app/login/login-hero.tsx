@@ -40,9 +40,11 @@ export function LoginHero() {
           </p>
         </div>
 
-        <figure className="relative mt-6 hidden h-56 motion-safe:animate-fade-in motion-safe:[animation-delay:300ms] sm:block lg:hidden lg:h-auto lg:min-h-0 lg:flex-1 lg:tall:block">
+        <figure className="relative mt-6 h-48 motion-safe:animate-fade-in motion-safe:[animation-delay:300ms] sm:h-56 lg:hidden lg:h-auto lg:min-h-0 lg:flex-1 lg:tall:block">
           <LogisticsAnimation className="h-full w-full" />
-          <div className="absolute right-0 bottom-0">
+          {/* On a phone the lorry fills the bottom corner, so the button
+              sits in the empty top corner there. */}
+          <div className="absolute top-0 right-0 sm:top-auto sm:bottom-0">
             <MotionToggle />
           </div>
         </figure>

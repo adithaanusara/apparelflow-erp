@@ -69,13 +69,18 @@ export function DemoCredentials({
   return (
     <section
       aria-labelledby="demo-heading"
-      className="border-t border-slate-200 bg-slate-50/80 px-7 py-5 motion-safe:animate-fade-in motion-safe:[animation-delay:380ms] sm:px-9"
+      className="border-t border-slate-200 bg-slate-50/80 px-5 py-5 motion-safe:animate-fade-in motion-safe:[animation-delay:380ms] sm:px-9"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <h3 id="demo-heading" className="text-sm font-bold text-slate-900">
+        <h3
+          id="demo-heading"
+          className="text-sm font-bold whitespace-nowrap text-slate-900"
+        >
           Demo accounts
         </h3>
-        <p className="text-xs text-slate-600">One per factory role</p>
+        <p className="text-right text-xs text-slate-600">
+          One per factory role
+        </p>
       </div>
 
       <div
@@ -133,22 +138,33 @@ export function DemoCredentials({
           ).map(([label, field, value]) => (
             <div
               key={field}
-              className="flex items-center gap-3 py-1.5 pr-1.5 pl-3.5"
+              className="flex items-center gap-2 py-1.5 pr-1.5 pl-3.5 sm:gap-3"
             >
-              {/* Label above value, so a long email stays on one line. */}
+              {/* Label above value, so a long email stays on one line. On
+                  the narrowest phones it can only wrap after the "@". */}
               <div className="min-w-0 flex-1">
                 <dt className="text-[11px] leading-4 font-semibold tracking-wider text-slate-600 uppercase">
                   {label}
                 </dt>
-                <dd className="font-mono text-[13px] leading-5 break-all text-slate-900 sm:text-sm">
-                  {value}
+                <dd className="font-mono text-[13px] leading-5 [overflow-wrap:anywhere] text-slate-900 sm:text-sm">
+                  {field === "email" ? (
+                    <>
+                      {value.slice(0, value.indexOf("@") + 1)}
+                      <wbr />
+                      {value.slice(value.indexOf("@") + 1)}
+                    </>
+                  ) : (
+                    value
+                  )}
                 </dd>
               </div>
               <button
                 type="button"
                 onClick={() => copy(field, value)}
                 aria-label={`Copy ${label.toLowerCase()} for ${roleLabel}`}
-                className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-700 ${
+                // A square icon button on phones, which leaves the email the
+                // width it needs; the word joins it from the `sm` size up.
+                className={`inline-flex size-10 shrink-0 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-700 sm:size-auto sm:px-2.5 sm:py-1.5 ${
                   copied === field
                     ? "bg-green-50 text-green-800"
                     : "text-blue-800 hover:bg-blue-50"
@@ -157,7 +173,7 @@ export function DemoCredentials({
                 <svg
                   aria-hidden="true"
                   viewBox="0 0 20 20"
-                  className="size-3.5"
+                  className="size-4 sm:size-3.5"
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="1.8"
@@ -173,7 +189,9 @@ export function DemoCredentials({
                     </>
                   )}
                 </svg>
-                {copied === field ? "Copied" : "Copy"}
+                <span className="hidden sm:inline">
+                  {copied === field ? "Copied" : "Copy"}
+                </span>
               </button>
             </div>
           ))}

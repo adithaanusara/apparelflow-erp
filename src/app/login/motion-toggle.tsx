@@ -17,7 +17,7 @@ export function MotionToggle() {
           ?.toggleAttribute("data-motion-paused", !paused);
         setPaused(!paused);
       }}
-      className="inline-flex items-center gap-1.5 rounded-full border border-white/30 bg-slate-950/40 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur transition-colors duration-150 hover:bg-white/15 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white motion-reduce:hidden"
+      className="inline-flex items-center gap-1.5 rounded-full border max-sm:min-h-9 border-white/30 bg-slate-950/40 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur transition-colors duration-150 hover:bg-white/15 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white motion-reduce:hidden"
     >
       <svg
         aria-hidden="true"
