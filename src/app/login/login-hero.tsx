@@ -1,5 +1,4 @@
 import { ACCENT, LogisticsAnimation } from "./logistics-animation";
-import { MotionToggle } from "./motion-toggle";
 
 // The branding side of the sign-in page: the product name, a short promise
 // and an isometric loop of a bundle being verified and dispatched.
@@ -42,11 +41,6 @@ export function LoginHero() {
 
         <figure className="relative mt-6 h-48 motion-safe:animate-fade-in motion-safe:[animation-delay:300ms] sm:h-56 lg:hidden lg:h-auto lg:min-h-0 lg:flex-1 lg:tall:block">
           <LogisticsAnimation className="h-full w-full" />
-          {/* On a phone the lorry fills the bottom corner, so the button
-              sits in the empty top corner there. */}
-          <div className="absolute top-0 right-0 sm:top-auto sm:bottom-0">
-            <MotionToggle />
-          </div>
         </figure>
 
         <ol className="mt-4 hidden flex-wrap gap-x-5 gap-y-2 text-sm text-slate-200 motion-safe:animate-fade-in motion-safe:[animation-delay:500ms] sm:flex">
