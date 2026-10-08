@@ -97,6 +97,10 @@ export function DemoCredentials({
         />
         {DEMO_ACCOUNTS.map((option, index) => {
           const active = index === selected;
+          // Every label is set on two lines, department over job title, so
+          // the three tabs are the same shape at any width instead of some
+          // wrapping and some not.
+          const [department, ...title] = ROLE_LABELS[option.role].split(" ");
           return (
             <button
               key={option.role}
@@ -110,11 +114,22 @@ export function DemoCredentials({
               aria-controls="demo-panel"
               tabIndex={active ? 0 : -1}
               onClick={() => setSelected(index)}
-              className={`relative z-10 flex min-h-11 items-center justify-center rounded-lg px-2 py-1.5 text-center text-[13px] leading-tight font-semibold text-balance transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-700 ${
+              className={`group relative z-10 flex min-h-12 flex-col items-center justify-center rounded-lg px-1 py-1.5 text-center transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-700 ${
                 active ? "text-blue-900" : "text-slate-700 hover:text-slate-900"
               }`}
             >
-              {ROLE_LABELS[option.role]}
+              <span
+                className={`block text-[11px] leading-4 font-semibold tracking-wider uppercase transition-colors duration-200 ${
+                  active
+                    ? "text-blue-800"
+                    : "text-slate-600 group-hover:text-slate-700"
+                }`}
+              >
+                {department}
+              </span>{" "}
+              <span className="block text-[13px] leading-[1.15rem] font-semibold sm:text-sm">
+                {title.join(" ")}
+              </span>
             </button>
           );
         })}
