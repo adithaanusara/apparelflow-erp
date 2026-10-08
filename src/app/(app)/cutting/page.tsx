@@ -1,248 +1,29 @@
-import {
-  ORDER_STATUS_LABELS,
-  canDeleteOrder,
-  canEditOrder,
-  canTransition,
-  type OrderStatus,
-} from "@/lib/order-rules";
-import { TrafficLight } from "@/components/traffic-light";
 import { requirePageRole } from "@/server/auth/page-session";
 import { getDb } from "@/server/db/client";
 import { listOrders, listRecipes } from "@/server/orders/service";
-import { DeleteOrderButton } from "./delete-order-button";
-import { OrderDialog } from "./order-dialog";
-import { SubmitOrderButton } from "./submit-order-button";
+import { filterFromParam } from "./order-filters";
+import { OrdersDashboard } from "./orders-dashboard";
 
-const STATUS_BADGE: Record<OrderStatus, string> = {
-  CUTTING_IN_PROGRESS: "border-slate-500 bg-slate-100 text-slate-900",
-  PENDING_VERIFICATION: "border-amber-700 bg-amber-100 text-amber-950",
-  REJECTED: "border-red-700 bg-red-100 text-red-950",
-  VERIFIED: "border-green-700 bg-green-100 text-green-950",
-};
-
-const quantityFormat = new Intl.NumberFormat("en-US");
-const dateFormat = new Intl.DateTimeFormat("en-GB", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
-
-export default async function CuttingPage() {
+export default async function CuttingPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ status?: string | string[] }>;
+}) {
   await requirePageRole("cutting_supervisor");
   const db = getDb();
-  const [recipes, orders] = await Promise.all([
+  const [recipes, orders, { status }] = await Promise.all([
     listRecipes(db),
     listOrders(db),
+    searchParams,
   ]);
 
+  // The status in the URL only chooses which tab opens first. Every order on
+  // this page is one the Cutting Supervisor is already allowed to see.
   return (
-    <>
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Cutting orders</h1>
-          <p className="mt-1 text-slate-700">
-            Create a batch from a recipe, then submit it to the QC station.
-          </p>
-        </div>
-        <OrderDialog recipes={recipes} />
-      </div>
-
-      {orders.length === 0 ? (
-        <p className="mt-8 rounded-lg border border-slate-300 bg-white p-6 text-slate-700">
-          No cutting orders yet. Create the first one with “New cutting order”.
-        </p>
-      ) : (
-        <ul className="mt-6 space-y-4">
-          {orders.map((order) => {
-            const overCap = order.wastagePct > order.recipe.wastageCap;
-            const counted = order.items.some((item) => item.actualQty !== null);
-            // With counts shown there are five columns; on a phone the
-            // per-garment multiplier is the one to drop.
-            const perGarmentCell = counted ? "hidden sm:table-cell" : "";
-            return (
-              <li
-                key={order.id}
-                className="rounded-lg border border-slate-300 bg-white p-5"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h2 className="font-mono text-lg font-bold text-slate-900">
-                      {order.orderNo}
-                    </h2>
-                    <p className="text-slate-900">
-                      {order.recipe.recipeCode} — {order.recipe.name}
-                    </p>
-                  </div>
-                  <span
-                    className={`rounded-full border px-3 py-1 text-sm font-semibold ${STATUS_BADGE[order.status]}`}
-                  >
-                    {ORDER_STATUS_LABELS[order.status]}
-                  </span>
-                </div>
-
-                {order.status === "REJECTED" && order.latestRejection && (
-                  <p className="mt-4 rounded-md border border-red-700 bg-red-50 px-3 py-2 text-sm text-red-950">
-                    <span className="font-semibold">
-                      Rejected by {order.latestRejection.verifierName} on{" "}
-                      {dateFormat.format(new Date(order.latestRejection.at))}{" "}
-                      UTC:
-                    </span>{" "}
-                    {order.latestRejection.note}
-                  </p>
-                )}
-
-                <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
-                  <div>
-                    <dt className="text-slate-700">Target quantity</dt>
-                    <dd className="font-semibold text-slate-900 tabular-nums">
-                      {quantityFormat.format(order.targetQty)} garments
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-slate-700">Fabric roll</dt>
-                    <dd className="font-mono font-semibold break-all text-slate-900">
-                      {order.fabricRollId}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-slate-700">Fabric used / expected</dt>
-                    <dd className="font-semibold text-slate-900 tabular-nums">
-                      {quantityFormat.format(order.actualFabricYds)} /{" "}
-                      {quantityFormat.format(order.expectedFabricYds)} yd
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-slate-700">
-                      Wastage (cap {order.recipe.wastageCap}%)
-                    </dt>
-                    <dd
-                      className={`font-semibold tabular-nums ${overCap ? "text-red-800" : "text-slate-900"}`}
-                    >
-                      {order.wastagePct}%{overCap && " — above cap"}
-                    </dd>
-                  </div>
-                </dl>
-
-                <details className="mt-4" open={order.status === "REJECTED"}>
-                  <summary className="cursor-pointer text-sm font-semibold text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700">
-                    {counted ? "Component counts" : "Expected component counts"}{" "}
-                    ({order.items.length})
-                  </summary>
-                  <div className="overflow-x-auto">
-                    <table className="mt-2 w-full max-w-2xl text-left text-sm text-slate-900">
-                      <thead>
-                        <tr className="border-b border-slate-400">
-                          <th scope="col" className="py-1.5 font-semibold">
-                            Component
-                          </th>
-                          <th
-                            scope="col"
-                            className={`py-1.5 text-right font-semibold ${perGarmentCell}`}
-                          >
-                            Per garment
-                          </th>
-                          <th
-                            scope="col"
-                            className="py-1.5 text-right font-semibold"
-                          >
-                            Expected pieces
-                          </th>
-                          {counted && (
-                            <>
-                              <th
-                                scope="col"
-                                className="py-1.5 pl-2 sm:pl-4 text-right font-semibold"
-                              >
-                                Counted
-                              </th>
-                              <th
-                                scope="col"
-                                className="py-1.5 pl-2 sm:pl-4 font-semibold"
-                              >
-                                Status
-                              </th>
-                            </>
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {order.items.map((item) => (
-                          <tr
-                            key={item.componentId}
-                            className="border-b border-slate-200"
-                          >
-                            <td className="py-1.5">{item.componentName}</td>
-                            <td
-                              className={`py-1.5 text-right tabular-nums ${perGarmentCell}`}
-                            >
-                              {item.piecesPerGarment}
-                            </td>
-                            <td className="py-1.5 text-right font-semibold tabular-nums">
-                              {quantityFormat.format(item.expectedQty)}
-                            </td>
-                            {counted && (
-                              <>
-                                <td className="py-1.5 pl-2 sm:pl-4 text-right font-semibold tabular-nums">
-                                  {item.actualQty === null
-                                    ? "—"
-                                    : quantityFormat.format(item.actualQty)}
-                                </td>
-                                <td className="py-1.5 pl-2 sm:pl-4">
-                                  <TrafficLight
-                                    expectedQty={item.expectedQty}
-                                    actualQty={item.actualQty}
-                                    status={item.status}
-                                    compact
-                                  />
-                                </td>
-                              </>
-                            )}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-
-                <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
-                  <p className="text-sm text-slate-700">
-                    Created by {order.createdByName} on{" "}
-                    {dateFormat.format(new Date(order.createdAt))} UTC
-                  </p>
-                  <div className="flex flex-wrap items-start justify-end gap-3">
-                    {canDeleteOrder(order.status) && (
-                      <DeleteOrderButton
-                        orderId={order.id}
-                        orderNo={order.orderNo}
-                      />
-                    )}
-                    {canEditOrder(order.status) && (
-                      // Keyed on the last update so the form starts from the
-                      // saved values after each edit.
-                      <OrderDialog
-                        key={order.updatedAt}
-                        recipes={recipes}
-                        order={order}
-                      />
-                    )}
-                    {canTransition(order.status, "PENDING_VERIFICATION") && (
-                      <SubmitOrderButton
-                        orderId={order.id}
-                        orderNo={order.orderNo}
-                        label={
-                          order.status === "REJECTED"
-                            ? "Resubmit for verification"
-                            : "Submit for verification"
-                        }
-                      />
-                    )}
-                  </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </>
+    <OrdersDashboard
+      orders={orders}
+      recipes={recipes}
+      initialFilter={filterFromParam(status)}
+    />
   );
 }

@@ -34,7 +34,7 @@ export function SubmitOrderButton({
         type="button"
         onClick={submit}
         disabled={pending}
-        aria-label={`${label} for order ${orderNo}`}
+        aria-label={`${label} order ${orderNo} for verification`}
         className={primaryButtonClass}
       >
         {pending ? "Submitting…" : label}

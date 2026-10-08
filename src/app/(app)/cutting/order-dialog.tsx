@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
 import {
+  editActionClass,
   fieldErrorClass,
   inputClass,
   labelClass,
@@ -10,6 +11,7 @@ import {
   secondaryButtonClass,
 } from "@/components/ui";
 import { sendJson } from "@/lib/api-client";
+import { PencilIcon } from "./order-action-icons";
 import {
   checkActualFabricYds,
   checkTargetQty,
@@ -169,18 +171,38 @@ export function OrderDialog({
         type="button"
         onClick={() => dialogRef.current?.showModal()}
         aria-label={order ? `Edit order ${order.orderNo}` : undefined}
-        className={order ? secondaryButtonClass : primaryButtonClass}
+        className={order ? editActionClass : primaryButtonClass}
       >
-        {order ? "Edit" : "New cutting order"}
+        {order ? (
+          <>
+            <PencilIcon />
+            Edit
+          </>
+        ) : (
+          <>
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              className="size-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+            >
+              <path d="M10 4.5v11M4.5 10h11" />
+            </svg>
+            New cutting order
+          </>
+        )}
       </button>
 
       <dialog
         ref={dialogRef}
         onClose={resetForm}
         aria-labelledby={`${idPrefix}title`}
-        className="m-auto w-[calc(100%-2rem)] max-w-2xl rounded-lg border border-slate-400 bg-white p-0 text-slate-900 backdrop:bg-slate-900/60"
+        className="m-auto w-[calc(100%-2rem)] max-w-2xl rounded-2xl bg-white p-0 text-slate-900 shadow-[0_24px_64px_-16px_rgb(2_6_23/0.45)] ring-1 ring-slate-900/10 backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm"
       >
-        <form onSubmit={handleSubmit} noValidate className="p-6">
+        <form onSubmit={handleSubmit} noValidate className="p-6 sm:p-8">
           <h2
             id={`${idPrefix}title`}
             className="text-xl font-bold text-slate-900"
