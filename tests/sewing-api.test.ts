@@ -479,6 +479,26 @@ describe("sewing start database rules", () => {
     },
   );
 
+  it("keeps a batch out of the queue when it is pushed to VERIFIED with no sign-off", async () => {
+    const order = await orderIn("PENDING_VERIFICATION");
+    // Every count matches, so only the missing sign-off stands in the way.
+    await db
+      .update(verificationItems)
+      .set({ actualQty: sql`expected_qty`, status: "GREEN" })
+      .where(eq(verificationItems.orderId, order.id));
+
+    expect(
+      await rejectionMessage(
+        db
+          .update(cuttingOrders)
+          .set({ status: "VERIFIED" })
+          .where(eq(cuttingOrders.id, order.id)),
+      ),
+    ).toMatch(/without a signed verification decision/);
+    expect(await queuedIds()).not.toContain(order.id);
+    expect((await start("sewing_supervisor", order.id)).status).toBe(404);
+  });
+
   it("refuses a start with no user recorded", async () => {
     const order = await orderIn("VERIFIED");
     expect(await rejectionMessage(markStarted(order.id, null))).toMatch(

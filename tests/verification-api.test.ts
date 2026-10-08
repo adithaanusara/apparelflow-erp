@@ -1,13 +1,14 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { NextRequest } from "next/server";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { DEMO_ACCOUNTS } from "@/lib/demo-accounts";
 import { ORDER_STATUSES, canTransition } from "@/lib/order-rules";
 import type { Role } from "@/lib/roles";
+import { SESSION_COOKIE, createSessionToken } from "@/server/auth/session";
 import type { Database } from "@/server/db/client";
-import { cuttingOrders, recipes, users, verificationItems, verificationLogs } from "@/server/db/schema";
+import { cuttingOrders, recipeComponents, recipes, users, verificationItems, verificationLogs } from "@/server/db/schema";
 import type { OrderSummary } from "@/server/orders/service";
-import { createTestDb } from "./test-db";
+import { createTestDb, signOff } from "./test-db";
 
 let db: Database;
 
@@ -66,6 +67,35 @@ async function pendingOrder(): Promise<OrderSummary> {
   const { order } = await created.json();
   const submitted = await submitOrder(request(`/api/orders/${order.id}/submit`, "POST", cookies.cutting_supervisor), ctx(order.id));
   return (await submitted.json()).order;
+}
+
+// The same order, still with the supervisor.
+async function draftOrder(recipeId = blouseId): Promise<OrderSummary> {
+  const created = await createOrder(
+    request("/api/orders", "POST", cookies.cutting_supervisor, { recipeId, targetQty: 10, fabricRollId: "FAB-ROLL-900", actualFabricYds: 18 }),
+    undefined,
+  );
+  return (await created.json()).order;
+}
+async function submit(id: number): Promise<OrderSummary> {
+  const submitted = await submitOrder(request(`/api/orders/${id}/submit`, "POST", cookies.cutting_supervisor), ctx(id));
+  return (await submitted.json()).order;
+}
+
+// A pending order on a recipe of its own (Front x1, Pocket x2), so a test can
+// change the recipe without disturbing the orders of the other tests.
+let ownRecipes = 0;
+async function orderOnOwnRecipe() {
+  const [recipe] = await db
+    .insert(recipes)
+    .values({ recipeCode: `REC-OWN${++ownRecipes}`, name: `Own Recipe ${ownRecipes}`, category: "Test", stdFabricYards: 1.8, wastageCap: 5 })
+    .returning();
+  await db.insert(recipeComponents).values([
+    { recipeId: recipe.id, componentName: "Front", piecesPerGarment: 1 },
+    { recipeId: recipe.id, componentName: "Pocket", piecesPerGarment: 2 },
+  ]);
+  const order = await submit((await draftOrder(recipe.id)).id);
+  return { order, recipeId: recipe.id };
 }
 
 // Counts every component, offsetting the named ones from the expected count.
@@ -213,10 +243,96 @@ describe("approval (hard-stop gatekeeper)", () => {
     expect((await approve("cutting_verifier", order.id)).status).toBe(422);
   });
 
-  it("blocks approval with 422 when a component row is missing", async () => {
+  it("blocks approval with 422 when the order has no checklist at all", async () => {
+    // Removed before submission: afterwards the database no longer allows it.
+    const draft = await draftOrder();
+    await db.delete(verificationItems).where(eq(verificationItems.orderId, draft.id));
+    await submit(draft.id);
+
+    const response = await approve("cutting_verifier", draft.id);
+    expect(response.status).toBe(422);
+    expect((await response.json()).error.message).toMatch(/no components/);
+    expect(await statusOf(draft.id)).toBe("PENDING_VERIFICATION");
+  });
+
+  it("blocks approval with 422 when one component is missing from the checklist, even if every other count matches", async () => {
+    const draft = await draftOrder();
+    const [missing, ...rest] = draft.items;
+    await db
+      .delete(verificationItems)
+      .where(and(eq(verificationItems.orderId, draft.id), eq(verificationItems.componentId, missing.componentId)));
+    await submit(draft.id);
+    const saved = await saveCounts("cutting_verifier", draft.id, rest.map((item) => ({ componentId: item.componentId, actualQty: item.expectedQty })));
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).order.items.every((item: OrderSummary["items"][number]) => item.status === "GREEN")).toBe(true);
+
+    const response = await approve("cutting_verifier", draft.id);
+    expect(response.status).toBe(422);
+    const { error } = await response.json();
+    expect(error.code).toBe("APPROVAL_BLOCKED");
+    expect(error.message).toMatch(/does not match its recipe/);
+    expect(error.fieldErrors).toEqual({ [missing.componentId]: `${missing.componentName}: Missing from the checklist.` });
+    expect(await statusOf(draft.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(draft.id)).toHaveLength(0);
+  });
+
+  it("blocks approval with 422 when the recipe has a component the checklist never had", async () => {
+    const { order, recipeId } = await orderOnOwnRecipe();
+    await countAll(order);
+    const [added] = await db.insert(recipeComponents).values({ recipeId, componentName: "Collar", piecesPerGarment: 1 }).returning();
+
+    const response = await approve("cutting_verifier", order.id);
+    expect(response.status).toBe(422);
+    expect((await response.json()).error.fieldErrors).toEqual({ [added.id]: "Collar: Missing from the checklist." });
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+  });
+
+  it("blocks approval with 422 when an expected quantity is not what the recipe requires", async () => {
+    const { order, recipeId } = await orderOnOwnRecipe();
+    await countAll(order);
+    const pocket = order.items.find((item) => item.componentName === "Pocket")!;
+    await db.update(recipeComponents).set({ piecesPerGarment: 3 }).where(and(eq(recipeComponents.recipeId, recipeId), eq(recipeComponents.componentName, "Pocket")));
+
+    const response = await approve("cutting_verifier", order.id);
+    expect(response.status).toBe(422);
+    expect((await response.json()).error.fieldErrors).toEqual({
+      [pocket.componentId]: "Pocket: The checklist expects 20, but the recipe requires 30.",
+    });
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(order.id)).toHaveLength(0);
+  });
+
+  it("still approves an order whose checklist matches its recipe", async () => {
+    const { order } = await orderOnOwnRecipe();
+    await countAll(order);
+    expect((await approve("cutting_verifier", order.id)).status).toBe(200);
+    expect(await statusOf(order.id)).toBe("VERIFIED");
+  });
+
+  it("returns 403 and writes nothing when the signed-in verifier has since lost the role", async () => {
     const order = await countAll(await pendingOrder());
-    await db.delete(verificationItems).where(eq(verificationItems.orderId, order.id));
-    expect((await approve("cutting_verifier", order.id)).status).toBe(422);
+    const verifier = eq(users.id, userIds.cutting_verifier);
+    await db.update(users).set({ role: "sewing_supervisor" }).where(verifier);
+    try {
+      // The cookie still says cutting_verifier, so the route guard lets it in.
+      expect((await approve("cutting_verifier", order.id)).status).toBe(403);
+      expect((await reject("cutting_verifier", order.id)).status).toBe(403);
+    } finally {
+      await db.update(users).set({ role: "cutting_verifier" }).where(verifier);
+    }
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(order.id)).toHaveLength(0);
+  });
+
+  it("returns 401 when the session belongs to a user that no longer exists", async () => {
+    const order = await countAll(await pendingOrder());
+    const token = await createSessionToken({ userId: 999_999, role: "cutting_verifier", fullName: "Removed User", email: "removed@apparelflow.demo" });
+    const cookie = `${SESSION_COOKIE}=${token}`;
+
+    const approval = await approveRoute(request(`/api/verification/orders/${order.id}/approve`, "POST", cookie), ctx(order.id));
+    expect(approval.status).toBe(401);
+    const rejection = await rejectRoute(request(`/api/verification/orders/${order.id}/reject`, "POST", cookie, { note: "Short" }), ctx(order.id));
+    expect(rejection.status).toBe(401);
     expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
   });
 
@@ -417,8 +533,7 @@ describe("GET /api/verification/history", () => {
       .values({ email: "second.verifier@apparelflow.demo", passwordHash: "not-a-real-hash", role: "cutting_verifier", fullName: "Second Verifier" })
       .returning();
     const order = await pendingOrder();
-    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, order.id));
-    await db.insert(verificationLogs).values({ orderId: order.id, verifierId: other.id, decision: "REJECTED", rejectionNote: "Rejected by someone else", wastagePct: 5 });
+    await signOff(db, order.id, "REJECTED", { verifierId: other.id, rejectionNote: "Rejected by someone else", wastagePct: 5 });
 
     const mine = await history();
     for (const query of [`?verifierId=${other.id}`, "?verifierId=all", `?userId=${other.id}&all=true`]) {
@@ -499,7 +614,8 @@ describe("database triggers", () => {
       await setStatus(id, "PENDING_VERIFICATION");
       // All counted and matching, so only the transition rule is under test.
       await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, id));
-      if (from !== "PENDING_VERIFICATION") await setStatus(id, from);
+      if (from === "VERIFIED") await signOff(db, id, "APPROVED");
+      if (from === "REJECTED") await signOff(db, id, "REJECTED");
       return id as number;
     }
 
@@ -507,11 +623,135 @@ describe("database triggers", () => {
       for (const to of ORDER_STATUSES) {
         if (from === to) continue;
         const id = await orderIn(from);
-        const message = await rejectionMessage(setStatus(id, to));
+        // A decision is moved the way the database requires, signed in the
+        // same transaction, so that what is left to refuse it is the
+        // transition rule alone.
+        const move =
+          from === "PENDING_VERIFICATION" && (to === "VERIFIED" || to === "REJECTED")
+            ? signOff(db, id, to === "VERIFIED" ? "APPROVED" : "REJECTED")
+            : setStatus(id, to);
+        const message = await rejectionMessage(move);
+        if (message !== "the query was not rejected") expect(message, `${from} -> ${to}`).toMatch(/cannot move from/);
         const allowed = message === "the query was not rejected";
         expect(allowed, `${from} -> ${to}`).toBe(canTransition(from, to));
       }
     }
+  });
+
+  it("refuses to move an order to VERIFIED or REJECTED without a signed decision", async () => {
+    const order = await countAll(await pendingOrder());
+    for (const status of ["VERIFIED", "REJECTED"] as const) {
+      expect(await rejectionMessage(setStatus(order.id, status))).toMatch(/without a signed verification decision/);
+    }
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(order.id)).toHaveLength(0);
+  });
+
+  it("does not accept an earlier rejection as the signature for a later one", async () => {
+    const order = await countAll(await pendingOrder(), { "Sleeve Cuffs": -4 });
+    expect((await reject("cutting_verifier", order.id)).status).toBe(200);
+    await submit(order.id);
+
+    expect(await rejectionMessage(setStatus(order.id, "REJECTED"))).toMatch(/without a signed verification decision/);
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(order.id)).toHaveLength(1);
+  });
+
+  it("refuses a decision for an order that is not at the QC station", async () => {
+    const draft = await draftOrder();
+    const verified = await approvedOrder();
+    const rejected = await countAll(await pendingOrder(), { "Sleeve Cuffs": -4 });
+    await reject("cutting_verifier", rejected.id);
+
+    for (const id of [draft.id, verified.id, rejected.id]) {
+      for (const decision of ["APPROVED", "REJECTED"] as const) {
+        const insert = db.insert(verificationLogs).values({ orderId: id, verifierId: userIds.cutting_verifier, decision, rejectionNote: "Forged", wastagePct: 0 });
+        expect(await rejectionMessage(insert), `${decision} for order ${id}`).toMatch(/only be recorded for an order that is PENDING_VERIFICATION/);
+      }
+    }
+    expect(await logsFor(draft.id)).toHaveLength(0);
+    expect(await logsFor(verified.id)).toHaveLength(1);
+    expect(await logsFor(rejected.id)).toHaveLength(1);
+  });
+
+  it("refuses a decision signed by anyone but a cutting verifier", async () => {
+    const order = await countAll(await pendingOrder());
+    for (const verifierId of [userIds.cutting_supervisor, userIds.sewing_supervisor, 999_999]) {
+      expect(await rejectionMessage(signOff(db, order.id, "APPROVED", { verifierId }))).toMatch(/only be signed by a cutting verifier/);
+      expect(await rejectionMessage(signOff(db, order.id, "REJECTED", { verifierId }))).toMatch(/only be signed by a cutting verifier/);
+    }
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(order.id)).toHaveLength(0);
+  });
+
+  it("refuses a decision that does not move the order, or moves it the other way", async () => {
+    const order = await countAll(await pendingOrder());
+    const log = (decision: "APPROVED" | "REJECTED") => ({ orderId: order.id, verifierId: userIds.cutting_verifier, decision, rejectionNote: "Short", wastagePct: 0 });
+
+    // An audit row on its own, with the order left where it was.
+    expect(await rejectionMessage(db.insert(verificationLogs).values(log("APPROVED")))).toMatch(/not moved to the matching status/);
+    expect(await rejectionMessage(db.insert(verificationLogs).values(log("REJECTED")))).toMatch(/not moved to the matching status/);
+
+    // A rejection signed, but the order pushed to VERIFIED.
+    const mismatched = db.transaction(async (tx) => {
+      await tx.insert(verificationLogs).values(log("REJECTED"));
+      await tx.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, order.id));
+    });
+    expect(await rejectionMessage(mismatched)).toMatch(/not moved to the matching status|without a signed verification decision/);
+
+    expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+    expect(await logsFor(order.id)).toHaveLength(0);
+  });
+
+  it("stamps a decision with the database clock, whatever time is supplied", async () => {
+    const order = await countAll(await pendingOrder());
+    await signOff(db, order.id, "APPROVED", { timestamp: new Date("2020-01-01T00:00:00Z") });
+
+    const [log] = await logsFor(order.id);
+    expect(Math.abs(log.timestamp.getTime() - Date.now())).toBeLessThan(60_000);
+  });
+
+  it("refuses VERIFIED, even with a signed decision, when the checklist does not match the recipe", async () => {
+    const changed = await orderOnOwnRecipe();
+    await countAll(changed.order);
+    await db.update(recipeComponents).set({ piecesPerGarment: 3 }).where(and(eq(recipeComponents.recipeId, changed.recipeId), eq(recipeComponents.componentName, "Pocket")));
+    expect(await rejectionMessage(signOff(db, changed.order.id, "APPROVED"))).toMatch(/checklist does not match the recipe/);
+
+    const incomplete = await orderOnOwnRecipe();
+    await countAll(incomplete.order);
+    await db.insert(recipeComponents).values({ recipeId: incomplete.recipeId, componentName: "Collar", piecesPerGarment: 1 });
+    expect(await rejectionMessage(signOff(db, incomplete.order.id, "APPROVED"))).toMatch(/checklist does not match the recipe/);
+
+    for (const { order } of [changed, incomplete]) {
+      expect(await statusOf(order.id)).toBe("PENDING_VERIFICATION");
+      expect(await logsFor(order.id)).toHaveLength(0);
+    }
+  });
+
+  it("fixes the checklist once the order has been submitted", async () => {
+    const { order, recipeId } = await orderOnOwnRecipe();
+    const short = await countAll(order, { Pocket: -5 });
+    const items = eq(verificationItems.orderId, order.id);
+    const pocket = short.items.find((item) => item.componentName === "Pocket")!;
+
+    // Lowering what is expected so that a short count reads as a match.
+    const lowered = db.update(verificationItems).set({ expectedQty: 15, status: "GREEN" }).where(and(items, eq(verificationItems.componentId, pocket.componentId)));
+    expect(await rejectionMessage(lowered)).toMatch(/only the counted quantity/);
+    // Removing the short component, or adding one.
+    expect(await rejectionMessage(db.delete(verificationItems).where(and(items, eq(verificationItems.componentId, pocket.componentId))))).toMatch(/fixed once it is submitted/);
+    const [extra] = await db.insert(recipeComponents).values({ recipeId, componentName: "Collar", piecesPerGarment: 1 }).returning();
+    expect(await rejectionMessage(db.insert(verificationItems).values({ orderId: order.id, componentId: extra.id, expectedQty: 10 }))).toMatch(/fixed once it is submitted/);
+
+    const stored = await db.select().from(verificationItems).where(items);
+    expect(stored).toHaveLength(2);
+    expect(stored.find((item) => item.componentId === pocket.componentId)).toMatchObject({ expectedQty: 20, actualQty: 15, status: "RED" });
+    expect((await approve("cutting_verifier", order.id)).status).toBe(422);
+  });
+
+  it("never lets an expected quantity be edited, even before submission", async () => {
+    const draft = await draftOrder();
+    const edit = db.update(verificationItems).set({ expectedQty: 1 }).where(eq(verificationItems.orderId, draft.id));
+    expect(await rejectionMessage(edit)).toMatch(/only the counted quantity/);
   });
 
   it("makes the audit log append-only", async () => {

@@ -5,7 +5,7 @@ import { DEMO_ACCOUNTS } from "@/lib/demo-accounts";
 import type { Role } from "@/lib/roles";
 import type { Database } from "@/server/db/client";
 import { cuttingOrders, recipes, users, verificationItems } from "@/server/db/schema";
-import { createTestDb } from "./test-db";
+import { createTestDb, signOff } from "./test-db";
 
 let db: Database;
 
@@ -230,7 +230,7 @@ describe("POST /api/orders/:id/submit", () => {
     const id = await newOrderId();
     await submit(cookies.cutting_supervisor, id);
     await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, id));
-    await db.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, id));
+    await signOff(db, id, "APPROVED");
     expect((await submit(cookies.cutting_supervisor, id)).status).toBe(409);
   });
 
@@ -238,7 +238,7 @@ describe("POST /api/orders/:id/submit", () => {
     const id = await newOrderId();
     await submit(cookies.cutting_supervisor, id);
     await db.update(verificationItems).set({ actualQty: 0, status: "RED" }).where(eq(verificationItems.orderId, id));
-    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, id));
+    await signOff(db, id, "REJECTED");
 
     expect((await submit(cookies.cutting_supervisor, id)).status).toBe(200);
     const items = await db.select().from(verificationItems).where(eq(verificationItems.orderId, id));
@@ -274,7 +274,7 @@ describe("PUT /api/orders/:id (edit before verification)", () => {
     const order = await newOrder();
     await submit(cookies.cutting_supervisor, order.id);
     await db.update(verificationItems).set({ actualQty: 1, status: "RED" }).where(eq(verificationItems.orderId, order.id));
-    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, order.id));
+    await signOff(db, order.id, "REJECTED");
     return order;
   }
 
@@ -367,7 +367,7 @@ describe("PUT /api/orders/:id (edit before verification)", () => {
     expect((await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), targetQty: 1 })).status).toBe(409);
 
     await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, order.id));
-    await db.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, order.id));
+    await signOff(db, order.id, "APPROVED");
     const response = await edit(cookies.cutting_supervisor, order.id, { ...validOrder(), actualFabricYds: 90 });
     expect(response.status).toBe(409);
     expect(await rowOf(order.id)).toMatchObject({ targetQty: 50, actualFabricYds: 94.5 });
@@ -411,12 +411,12 @@ describe("DELETE /api/orders/:id", () => {
     await submit(cookies.cutting_supervisor, id);
     expect((await remove(cookies.cutting_supervisor, id)).status).toBe(409);
 
-    await db.update(cuttingOrders).set({ status: "REJECTED" }).where(eq(cuttingOrders.id, id));
+    await signOff(db, id, "REJECTED");
     expect((await remove(cookies.cutting_supervisor, id)).status).toBe(409);
 
     await db.update(cuttingOrders).set({ status: "PENDING_VERIFICATION" }).where(eq(cuttingOrders.id, id));
     await db.update(verificationItems).set({ actualQty: sql`expected_qty`, status: "GREEN" }).where(eq(verificationItems.orderId, id));
-    await db.update(cuttingOrders).set({ status: "VERIFIED" }).where(eq(cuttingOrders.id, id));
+    await signOff(db, id, "APPROVED");
     expect((await remove(cookies.cutting_supervisor, id)).status).toBe(409);
     expect(await exists(id)).toBe(true);
   });
