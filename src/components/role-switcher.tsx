@@ -30,14 +30,19 @@ export function RoleSwitcher({ currentRole }: { currentRole: Role }) {
   }
 
   return (
-    <div>
+    <div className="w-full sm:w-auto">
+      {/* On a phone the three roles share the full width as equal columns,
+          each label on two lines (department over job title), so none of
+          them wraps onto a row of its own. From the `sm` size up they sit in
+          one line as plain labels. */}
       <div
         role="group"
         aria-label="Switch demo role"
-        className="inline-flex flex-wrap gap-1 rounded-xl bg-white/10 p-1 ring-1 ring-white/15"
+        className="grid grid-cols-3 gap-1 rounded-xl bg-white/10 p-1 ring-1 ring-white/15 sm:inline-flex"
       >
         {DEMO_ACCOUNTS.map(({ role }) => {
           const active = role === currentRole;
+          const [department, ...title] = ROLE_LABELS[role].split(" ");
           return (
             <button
               key={role}
@@ -45,13 +50,24 @@ export function RoleSwitcher({ currentRole }: { currentRole: Role }) {
               aria-pressed={active}
               disabled={switchingTo !== null}
               onClick={() => switchTo(role)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white disabled:cursor-wait ${
+              className={`flex min-h-11 flex-col items-center justify-center rounded-lg px-1 py-1.5 text-center text-sm font-semibold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white disabled:cursor-wait sm:block sm:min-h-0 sm:px-3 sm:whitespace-nowrap ${
                 active
                   ? "bg-white text-slate-900 shadow-sm"
                   : "text-slate-100 hover:bg-white/10 hover:text-white"
               }`}
             >
-              {switchingTo === role ? "Switching…" : ROLE_LABELS[role]}
+              {switchingTo === role ? (
+                "Switching…"
+              ) : (
+                <>
+                  <span className="block text-[11px] leading-4 tracking-wider uppercase sm:inline sm:text-sm sm:leading-5 sm:tracking-normal sm:normal-case">
+                    {department}
+                  </span>{" "}
+                  <span className="block text-[13px] leading-[1.15rem] sm:inline sm:text-sm sm:leading-5">
+                    {title.join(" ")}
+                  </span>
+                </>
+              )}
             </button>
           );
         })}
